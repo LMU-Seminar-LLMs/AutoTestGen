@@ -37,7 +37,17 @@ class PythonAdapter(BaseAdapter):
             for subn in class_node.body
             if isinstance(subn, (ast.FunctionDef, ast.AsyncFunctionDef))
         ]
-        method_names = [method.name for method in method_nodes]
+        # Exclude properties for now.
+        method_names = [
+            method.name
+            for method in method_nodes
+            if not isinstance(
+                getattr(
+                    getattr(self.sourced_module, class_name), method.name
+                ),
+                property
+            )
+        ]
         return method_names
 
     def retrieve_func_source(self, func_name: str) -> str:
@@ -105,8 +115,10 @@ class PythonAdapter(BaseAdapter):
         test_lines = test.split("\n")
         import_string = f"from {self.mod_name} import {obj_name}"
         import_asterisk = f"from {self.mod_name} import *"
-        if (not import_string in test_lines and
-             not import_asterisk in test_lines):
+        if not [
+            l for l in test_lines
+            if l.startswith(import_string) or l == import_asterisk
+        ]: 
             test_lines.insert(0, import_string)
 
         # Making sure script is only executed when ran from main.
@@ -194,7 +206,7 @@ class PythonAdapter(BaseAdapter):
         class_attributes_str = "\n".join(class_attributes)
         imports_str = "\n".join(self.code_analyser.import_statements)
         constants_str = "\n".join([
-            f"{k}: {v}"
+            f"{k}={v}"
             for k, v in self.code_analyser.imported_constants.items()
         ])
         variables_str = "\n".join(self.code_analyser.variables)
@@ -265,7 +277,7 @@ class PythonAdapter(BaseAdapter):
 
         imports_str = "\n".join(self.code_analyser.import_statements)
         constants_str = "\n".join([
-            f"{k}: {v}"
+            f"{k}={v}"
             for k, v in self.code_analyser.imported_constants.items()
         ])
         variables_str = "\n".join(self.code_analyser.variables)
@@ -358,7 +370,8 @@ class AstVisitor(ast.NodeVisitor):
         modules dict.
         Runs recursively through the tree starting from node.
         """
-        self.import_statements.append(ast.unparse(node))
+        if node.names:
+            self.import_statements.append(ast.unparse(node))
         for alias in node.names:
             if alias.asname:
                 # Alias import
@@ -415,7 +428,7 @@ class AstVisitor(ast.NodeVisitor):
         in 'func_names' set.
         Runs recursively through the tree starting from node.
         """
-        fun_name = self._get_function_name(node.func)
+        fun_name = _get_function_name(node.func)
         if fun_name:
             self.func_names.add(fun_name)                
         self.generic_visit(node)
@@ -429,16 +442,16 @@ class AstVisitor(ast.NodeVisitor):
             # Simple single target:call assignment
             if isinstance(target, ast.Name):
                 if isinstance(node.value, ast.Call):
-                    func_name = self._get_function_name(node.value.func)
-                    if self._is_class(func_name, self.sourced_module):
+                    func_name = _get_function_name(node.value.func)
+                    if _is_class(func_name, self.sourced_module):
                         self.instances[target.id] = func_name
                     else:
                         self.func_names.add(func_name)
             elif isinstance(target, ast.Tuple):
                 # Tuple assignment with multiple targets and single value
                 if isinstance(node.value, ast.Call):
-                    func_name = self._get_function_name(node.value.func)
-                    if self._is_class(func_name, self.sourced_module):
+                    func_name = _get_function_name(node.value.func)
+                    if _is_class(func_name, self.sourced_module):
                         for target in target.elts:
                             if isinstance(target, ast.Name):
                                 self.instances[target.id] = func_name
@@ -448,8 +461,8 @@ class AstVisitor(ast.NodeVisitor):
                     # Tuple assignment with multiple targets and values
                     for tar_name, value in zip(target.elts, node.value.elts):
                         if isinstance(value, ast.Call):
-                            func_name = self._get_function_name(value.func)
-                            if self._is_class(func_name, self.sourced_module):
+                            func_name = _get_function_name(value.func)
+                            if _is_class(func_name, self.sourced_module):
                                 if isinstance(tar_name, ast.Name):
                                     self.instances[tar_name.id] = func_name
                             else:
@@ -463,52 +476,18 @@ class AstVisitor(ast.NodeVisitor):
         """
         if isinstance(node.value, ast.Call):
             # simple annotated assignment
-            func_name = self._get_function_name(node.value.func)
-            if self._is_class(func_name, self.sourced_module):
+            func_name = _get_function_name(node.value.func)
+            if _is_class(func_name, self.sourced_module):
                 if isinstance(node.target, ast.Name):
                     self.instances[node.target.id] = func_name
         if node.value is None:
             # Hint annotation without actual value assignment
             if isinstance(node.annotation, ast.Name):
-                class_name = self._get_function_name(node.annotation)
+                class_name = _get_function_name(node.annotation)
             if isinstance(node.annotation, ast.Subscript):
-                class_name = self._get_function_name(node.annotation.slice)
-            if self._is_class(class_name, self.sourced_module):
+                class_name = _get_function_name(node.annotation.slice)
+            if _is_class(class_name, self.sourced_module):
                 self.instances[node.target.id] = class_name
-
-    def _is_class(self, func_name: str, sourced_module: ModuleType) -> bool:
-        """Checks if a function call is a class instance creation."""
-        submodules = func_name.split('.')
-        if (
-            func_name in dir(sourced_module) or 
-            submodules[0] in dir(sourced_module)
-        ):
-            if len(submodules) != 1:
-                func_name = submodules[-1]
-                for submodule in submodules[:-1]:
-                    sourced_module = getattr(sourced_module, submodule)
-            if sourced_module is not None:
-                return inspect.isclass(getattr(sourced_module, func_name))
-        return False
-
-    def _get_function_name(self, node: ast.expr) -> str:
-        """
-        Tracks down object name that was called through recursion.
-        
-        Args:
-            node: ast node.
-        
-        Returns:
-            str: Function name.
-        """
-        if isinstance(node, ast.Name):
-            return node.id
-        elif isinstance(node, ast.Attribute):
-            return self._get_function_name(node.value) + '.' + node.attr
-        elif isinstance(node, ast.Call):
-            return self._get_function_name(node.func)
-        elif isinstance(node, ast.Constant):
-            return node.value
     
     def restore_visitor(self) -> None:
         """Resets visitor attributes."""
@@ -678,10 +657,12 @@ class CodeAnalyser:
         """
         imported_constants = dict()
         for module in module_asnames:
-            traced_module = _trace_module(module, self.sourced_module)
-            obj = getattr(traced_module, module.split(".")[-1])
+            obj = _trace_module(module, self.sourced_module)
+
             if type(obj) in self.primitives:
-                imported_constants[module] = str(obj)
+                # type hint
+                type_hint = f"{module.split('.')[-1]}: {type(obj).__name__}"
+                imported_constants[type_hint] = str(obj)
         return imported_constants
     
     def identify_body_variables(
@@ -744,9 +725,7 @@ class CodeAnalyser:
         for rest_node in rest_nodes:
             if isinstance(rest_node, ast.Assign):
                 if isinstance(rest_node.value, ast.Call):
-                    call_name = self.ast_visitor._get_function_name(
-                        rest_node.value.func
-                    )
+                    call_name = _get_function_name(rest_node.value.func)
                     if (
                         call_name in body_definiton_names or
                         call_name in modules_local
@@ -818,7 +797,10 @@ class CodeAnalyser:
         local_calls = [
             nm
             for nm in call_names
-            if nm in local_functions or nm.split(".")[0] in local_classes
+            if (
+                (nm in local_functions or nm.split(".")[0] in local_classes)
+                and nm != node.name
+            )
         ]
         return set(local_calls)
 
@@ -854,13 +836,15 @@ class CodeAnalyser:
                         + _get_init(call, self.sourced_module)
                         + "\n"
                     )
-                else:
-                    # If it is simple local function call
+            else:
+                source_code = _trace_call(call, self.sourced_module)
+                if source_code:
+                # If it is simple local function call
                     local_defs += (
                         "Definition for "
                         + call
                         + ":\n"
-                        + _trace_call(call, self.sourced_module)
+                        + source_code
                         + "\n"
                     )
         return local_defs
@@ -884,17 +868,18 @@ def _is_method(call_name: str, sourced_module: ModuleType) -> bool:
             sourced_module = getattr(sourced_module, submodule)
         except:
             return False
-    if (
-        inspect.isclass(sourced_module)
-        and callable(getattr(sourced_module, submodules[-1]))
-    ):
+    try:
+        method_attr = getattr(sourced_module, submodules[-1])
+    except:
+        return False
+    
+    if inspect.isclass(sourced_module) and callable(method_attr):
         return True
     return False
     
 def _has_init(call_name: str, sourced_module: ModuleType) -> bool:
     """
-    Checks if a class associated to call_name has an __init__
-        method definition.
+    Checks if a class associated to call_name has an __init__ method.
 
     Args:
         call_name (str): Name of the call [method name].
@@ -913,7 +898,34 @@ def _has_init(call_name: str, sourced_module: ModuleType) -> bool:
         return False
     return has_init
     
-def _get_init(call_name: str, sourced_module: ModuleType) -> str:
+def _is_class(call_name: str, sourced_module: ModuleType) -> bool:
+    """
+    Checks if a function call is a class instance creation.
+    
+    Args:
+        call_name (str): Name of the call.
+        sourced_module (ModuleType): Sourced module.
+    
+    Returns:
+        bool: True if call is a class instance creation.
+    """
+    submodules = call_name.split('.')
+    if (
+        call_name in dir(sourced_module)
+        or submodules[0] in dir(sourced_module)
+    ):
+        if len(submodules) != 1:
+            call_name = submodules[-1]
+            for submodule in submodules[:-1]:
+                sourced_module = getattr(sourced_module, submodule)
+        if sourced_module is not None:
+                try:
+                    return inspect.isclass(getattr(sourced_module, call_name))
+                except:
+                    pass
+    return False
+    
+def _get_init(call_name: str, sourced_module: ModuleType) -> Union[str, None]:
     """
     Given a method call name, returns corresponding class 
     __init__ definition.
@@ -927,6 +939,8 @@ def _get_init(call_name: str, sourced_module: ModuleType) -> str:
     """
     submodules = call_name.split('.')
     class_object = getattr(sourced_module, submodules[0])
+    if not _has_init(call_name, sourced_module):
+        return None
     return inspect.getsource(getattr(class_object, '__init__'))
 
 def _trace_module(module_name: str, sourced_module: ModuleType) -> ModuleType:
@@ -940,15 +954,20 @@ def _trace_module(module_name: str, sourced_module: ModuleType) -> ModuleType:
     Returns:
         ModuleType: last submodule.
     """
+    if not module_name:
+        return sourced_module
     submodules = module_name.split('.')
-    for submodule in submodules[:-1]:
+    for submodule in submodules:
         sourced_module = getattr(sourced_module, submodule)
     return sourced_module
-    
-def _trace_call(call_name: str, sourced_module: ModuleType) -> str:
+
+def _trace_call(
+    call_name: str,
+    sourced_module: ModuleType
+) -> Union[str, None]:
     """
     Helper Function traces a call recursively until reaching
-    the function, method definition itself.
+    the function, method definition itself and returns its source code.
 
     Args:
         call_name (str): Name of the call.
@@ -959,5 +978,30 @@ def _trace_call(call_name: str, sourced_module: ModuleType) -> str:
     """
     submodules = call_name.split('.')
     for submodule in submodules:
-        sourced_module = getattr(sourced_module, submodule)
+        try:
+            sourced_module = getattr(sourced_module, submodule)
+        except:
+            return None
     return inspect.getsource(sourced_module)
+
+def _get_function_name(node: ast.expr) -> str:
+    """
+    Takes an ast node and returns the name of the function or method
+    through recursion.
+    
+    Args:
+        node: ast node.
+    
+    Returns:
+        str: Function name.
+    """
+    if isinstance(node, ast.Name):
+        return node.id
+    elif isinstance(node, ast.Attribute):
+        return _get_function_name(node.value) + '.' + node.attr
+    elif isinstance(node, ast.Call):
+        return _get_function_name(node.func)
+    elif isinstance(node, ast.Constant):
+        return node.value
+    elif isinstance(node, ast.Subscript):
+        return _get_function_name(node.value)

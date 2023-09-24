@@ -5,14 +5,17 @@ class DBManager:
     """Class for managing operations on the database."""
 
     def __init__(self, db_path):
-        """Initialize DBManager object.
+        """
+        Initialize DBManager object.
+        
         Args:
             db_path (str): path to the database file.
         """
-        self.conn = self.connect_to_db(db_path)
+        self.db_path = db_path
+        self.conn: sqlite3.Connection = self.connect_to_db()
         self.conn.row_factory = sqlite3.Row
 
-    def connect_to_db(self, db_path: str) -> sqlite3.Connection:
+    def connect_to_db(self) -> sqlite3.Connection:
         """
         Establishes connection to the database. If db doesn't exist,
         creates one and adds tables.
@@ -23,8 +26,8 @@ class DBManager:
         Returns:
             sqlite3.Connection: connection to the database.
         """
-        db_exists = os.path.isfile(db_path)
-        self.conn = sqlite3.connect(db_path)
+        db_exists = os.path.isfile(self.db_path)
+        self.conn = sqlite3.connect(self.db_path)
         if not db_exists:
             self.create_tables()
         return self.conn
@@ -67,7 +70,7 @@ class DBManager:
                     (model, 0, 0)
                 )
         except Exception as e:
-            os.remove("autotestgen.db")
+            os.remove(self.db_path)
             self.conn.close()
             raise e
         finally:
@@ -100,8 +103,9 @@ class DBManager:
             cursor.close()
         self.conn.commit()
 
-    def get_row_from_db(self, id: int) -> sqlite3.Row:
-        """Returns data from the database.
+    def get_row_by_id(self, id: int) -> sqlite3.Row:
+        """
+        Returns data from the database.
 
         Args:
             id (int): id of the test.
@@ -117,8 +121,9 @@ class DBManager:
             cursor.close()
         return data
         
-    def get_class_tests(self, class_name: str) -> list[sqlite3.Row]:
-        """Returns all tests for the class from the database.
+    def get_rows_by_class_name(self, class_name: str) -> list[sqlite3.Row]:
+        """
+        Returns all tests for the class from the database.
 
         Args:
             class_name (str): name of the class.
@@ -134,8 +139,13 @@ class DBManager:
             cursor.close()
         return data
     
-    def get_method_tests(self, class_name: str, method: str) -> list[sqlite3.Row]:
-        """Returns all tests for the method from the database.
+    def get_rows_by_method_name(
+        self,
+        class_name: str,
+        method: str
+    ) -> list[sqlite3.Row]:
+        """
+        Returns all tests for the method from the database.
 
         Args:
             class_name (str): name of the class.
@@ -155,8 +165,12 @@ class DBManager:
             cursor.close()
         return data
     
-    def get_function_tests(self, function_name: str) -> list[sqlite3.Row]:
-        """Returns all tests for the function from the database.
+    def get_rows_by_function_name(
+        self,
+        function_name: str
+    ) -> list[sqlite3.Row]:
+        """
+        Returns all tests for the function from the database.
 
         Args:
             function_name (str): name of the function.
@@ -175,14 +189,57 @@ class DBManager:
             cursor.close()
         return data
     
+    def get_module_metadata(self, module_name: str) -> list[sqlite3.Row]:
+        """
+        Returns the metadata for all tests for the module from db.
+
+        Args:
+            module_name (str): name of the module.
+        
+        Returns:
+            list[sqlite3.Row]: list of rows from the database.
+        """
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT metadata FROM tests WHERE module=?",
+                (module_name,)
+            )
+            data = cursor.fetchall()
+        finally:
+            cursor.close()
+        return data
+    
+    def get_module_tests(self, module_name: str) -> list[sqlite3.Row]:
+        """
+        Returns all tests together with their ids for the given module.
+
+        Args:
+            module_name (str): name of the module.
+        
+        Returns:
+            list[sqlite3.Row]: list of rows from the database.
+        """
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT id, test FROM tests WHERE module=?",
+                (module_name,)
+            )
+            data = cursor.fetchall()
+        finally:
+            cursor.close()
+        return data
+    
     def update_test(self, id: int, test: str, metadata: str) -> None:
-        """Updates test in database.
+        """
+        Updates test in database.
 
         Args:
             id (int): id of the test.
-            test (str): new_test.
+            test (str): new test.
             metadata (str): metadata containing test and coverage
-                for the new_test (json format)
+                for the new test (json format)
         """
         cursor = self.conn.cursor()
         try:
@@ -195,7 +252,8 @@ class DBManager:
         self.conn.commit()
 
     def edit_test_in_db(self, id: int, test: str) -> None:
-        """Edits existing test in the database.
+        """
+        Edits existing test in the database.
 
         Args:
             id (int): id of the test.
@@ -203,7 +261,7 @@ class DBManager:
         """
         cursor = self.conn.cursor()
         # Get old test
-        data = self.get_row_from_db(id)
+        data = self.get_row_by_id(id)
         # Edit history
         history: list[dict] = json.loads(data["history"])
         history[-1].update({"content": test})
@@ -217,7 +275,8 @@ class DBManager:
         self.conn.commit()
     
     def get_usage_data(self) -> list[sqlite3.Row]:
-        """Returns data from the token_usage table.
+        """
+        Returns data from the token_usage table.
 
         Returns:
             list[sqlite3.Row]: complete token_usage table.
@@ -232,7 +291,8 @@ class DBManager:
 
 
     def delete_row_from_db(self, id: int) -> None:
-        """Deletes row from the database.
+        """
+        Deletes row from the database.
 
         Args:
             id (int): id of the test.
@@ -244,7 +304,7 @@ class DBManager:
             cursor.close()
         self.conn.commit()
 
-    def add_tests_to_db(
+    def add_test_to_db(
         self,
         module: str,
         class_name: str,

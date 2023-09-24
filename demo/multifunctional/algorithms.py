@@ -25,7 +25,7 @@ def fibonacci(n: int, memo: set={}) -> int:
 def recursive_binary_search(
     arr: list,
     target,
-    low:int=0, 
+    low:int=0,
     high:Union[int, None]=None
 ) -> Union[int, None]:
     """

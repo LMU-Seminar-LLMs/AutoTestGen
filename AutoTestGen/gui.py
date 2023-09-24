@@ -715,7 +715,7 @@ class ChatFrame(ttk.Frame):
         
         else:
             try:
-                self.master.db_manager.add_tests_to_db(
+                self.master.db_manager.add_test_to_db(
                     module=os.path.basename(config.ADAPTER.module),
                     class_name=class_name,
                     object_name=obj_name,
@@ -818,6 +818,12 @@ class UtilsFrame(ttk.Frame):
             label="Open Coverage",
             command=self.open_cov_report
         )
+        # Rerun All Tests
+        self.workst_tree.menu_wst.add_command(
+            label="Rerun All Tests",
+            command=self.rerun_all_tests
+        )
+
         self.workst_tree.bind("<Double-Button-1>", self.show_tests)
         self.workst_tree.pack(fill="both", expand=True, pady=5)
 
@@ -863,8 +869,73 @@ class UtilsFrame(ttk.Frame):
 
     def refresh(self) -> None:
         """Refreshes workstation and tests tree"""
+        if self.module is None: return
+        module_path = self.file_tree.item(self.module)["tags"][0]
+        # Recreate Adapter
+        _ = utils.set_adapter(self.master.language, module_dir=module_path)
+        # Repopulate Workstation Tree
         self.populate_ws_tree()
         self.tests_window.refresh()
+
+    def rerun_test(self, test:str, primary_id: int) -> None:
+        """Reruns a single test and updates the database"""
+        try:
+            result = self.master.cont_manager.run_tests_in_container(test)
+        except Exception as e:
+            self.master.logger.error(
+                f"Error occured while running tests: {e}"
+            )
+            return
+        if result["compile_error"]:
+            messagebox.showerror(
+                "Error",
+                "Error occured while compiling tests. "
+                "Please check the log for more details."
+            )
+            self.master.logger.error(
+                f"Compiling Error: {result['compile_error']}"
+            )
+            return
+        elif result["errors"]:
+            messagebox.showerror(
+                "Error",
+                "Error occured while running tests. "
+                "Please check the log for more details."
+            )
+            self.master.logger.error(
+                f"Running Error: {result['errors']}"
+            )
+            return
+        else:
+            try:
+                self.master.db_manager.update_test(
+                    primary_id,
+                    test,
+                    json.dumps(result)
+                )
+                self.master.logger.info("Tests successfully re-run.")
+            except Exception as e:
+                messagebox.showerror(
+                    "Error",
+                    "Error occured while updating database. "
+                    "Please check the log for more details."
+                )
+                self.master.logger.error(
+                    f"Database Error: {e}"
+                )
+                return
+        self.master.refresh()
+    
+    def rerun_all_tests(self, event=None) -> None:
+        """Re-runs all tests in selected module"""
+        if self.module is None: return
+        module_path = self.file_tree.item(self.module)["tags"][0]
+        data = self.master.db_manager.get_module_tests(
+            os.path.basename(module_path)
+        )
+        for row in data:
+            self.master.logger.info(f"Rerunning test: {row['id']}")
+            self.rerun_test(row["test"], row["id"])
 
     def show_stats(self, x, y) -> None:
         """Shows statistics window"""
@@ -876,7 +947,7 @@ class UtilsFrame(ttk.Frame):
         item = self.tests_window.focus()
         if not item: return
         prim_key = self.tests_window.item(item)["tags"][0]
-        data = self.master.db_manager.get_row_from_db(prim_key)
+        data = self.master.db_manager.get_row_by_id(prim_key)
         if data:
             # If system message is present, avoid repeating it.
             messages: list[str, str] = json.loads(data["history"])
@@ -890,7 +961,6 @@ class UtilsFrame(ttk.Frame):
         else:
             messagebox.showerror("Error", "No test history found in the db")
     
-    
     def get_test_coverage(self, id: int) -> int:
         """
         computes coverage of a single test
@@ -901,7 +971,7 @@ class UtilsFrame(ttk.Frame):
         Returns:
             int between 0 and 100.
         """
-        data = self.master.db_manager.get_row_from_db(id)
+        data = self.master.db_manager.get_row_by_id(id)
         if data:
             object_type = "class method" if data["class"] else "function"
             metadata: list[dict] = [json.loads(data["metadata"])]
@@ -960,7 +1030,6 @@ class UtilsFrame(ttk.Frame):
         if item is None:
             return
         self.module = item
-        self.workst_tree.delete(*self.workst_tree.get_children())
         module_path: str = self.file_tree.item(item)["tags"][0]
         if not module_path.endswith(self.master.suffix):
             messagebox.showerror(
@@ -980,7 +1049,7 @@ class UtilsFrame(ttk.Frame):
         _ = self.populate_ws_tree()
 
     def populate_ws_tree(self) -> None:
-        """Populates workstation tree add computes coverages"""
+        """Populates workstation tree and computes coverages"""
         # Populate Workstation Tree
         if self.module is None: return
         self.workst_tree.delete(*self.workst_tree.get_children())
@@ -992,10 +1061,17 @@ class UtilsFrame(ttk.Frame):
                 "No Function- or Class Definiton found in the selected file."
             )
             return
+        # metadata of all tests for the selected module
+        module_path = self.file_tree.item(self.module)["tags"][0]
+        data = self.master.db_manager.get_module_metadata(
+            os.path.basename(module_path)
+        )
+        test_metadata = [json.loads(row["metadata"]) for row in data]
+
         
         for func_name in func_names:
-            data = self.master.db_manager.get_function_tests(func_name)
-            test_metadata = [json.loads(row["metadata"]) for row in data]
+            # data = self.master.db_manager.get_function_tests(func_name)
+            # test_metadata = [json.loads(row["metadata"]) for row in data]
             cov = utils.compute_coverage(func_name, "function", test_metadata)
             self.workst_tree.insert(
                 parent="",
@@ -1004,8 +1080,8 @@ class UtilsFrame(ttk.Frame):
                 values=("function", cov)
             )
         for class_name in class_names:
-            data_cls = self.master.db_manager.get_class_tests(class_name)
-            test_metadata = [json.loads(row["metadata"]) for row in data_cls]
+            # data_cls = self.master.db_manager.get_class_tests(class_name)
+            # test_metadata = [json.loads(row["metadata"]) for row in data_cls]
             cov_class = utils.compute_coverage(
                 class_name,
                 "class",
@@ -1019,18 +1095,18 @@ class UtilsFrame(ttk.Frame):
             )
             methods = config.ADAPTER.retrieve_class_methods(class_name)
             for method in methods:
-                data_method = self.master.db_manager.get_method_tests(
-                    class_name,
-                    method
-                )
-                test_metadata_method = [
-                    json.loads(row["metadata"])
-                    for row in data_method
-                ]
+                # data_method = self.master.db_manager.get_method_tests(
+                #     class_name,
+                #     method
+                # )
+                # test_metadata_method = [
+                #     json.loads(row["metadata"])
+                #     for row in data_method
+                # ]
                 cov_method = utils.compute_coverage(
                     method,
                     "class method",
-                    test_metadata_method,
+                    test_metadata,
                     class_name
                 )
                 self.workst_tree.insert(
@@ -1045,22 +1121,34 @@ class UtilsFrame(ttk.Frame):
         item = self.workst_tree.focus()
         obj_name = self.workst_tree.item(item)["text"]
         obj_type = self.workst_tree.item(item)["values"][0]
-        
-        if obj_type == "class":
-            data = self.master.db_manager.get_class_tests(obj_name)
-            class_name = None
-        if obj_type == "function":
-            data = self.master.db_manager.get_function_tests(obj_name)
-            class_name = None
+        # metadata of all tests for the selected module
+        module_path = self.file_tree.item(self.module)["tags"][0]
+        data = self.master.db_manager.get_module_metadata(
+            os.path.basename(module_path)
+        )
+        metadata = [json.loads(row["metadata"]) for row in data]
         if obj_type == "class method":
             class_name = self.workst_tree.item(
                 self.workst_tree.parent(item)
             )["text"]
-            data = self.master.db_manager.get_method_tests(
-                class_name,
-                obj_name
-            )
-        metadata = [json.loads(row["metadata"]) for row in data]
+        else:
+            class_name = None
+        
+        # if obj_type == "class":
+        #     data = self.master.db_manager.get_class_tests(obj_name)
+        #     class_name = None
+        # if obj_type == "function":
+        #     data = self.master.db_manager.get_function_tests(obj_name)
+        #     class_name = None
+        # if obj_type == "class method":
+        #     class_name = self.workst_tree.item(
+        #         self.workst_tree.parent(item)
+        #     )["text"]
+        #     data = self.master.db_manager.get_method_tests(
+        #         class_name,
+        #         obj_name
+        #     )
+        # metadata = [json.loads(row["metadata"]) for row in data]
 
         __ = self.display_coverage_report(
             obj_name, obj_type, metadata, class_name
@@ -1147,7 +1235,7 @@ class TestsTree(ttk.Treeview):
         )
         self.menu.add_command(
             label="Rerun Test",
-            command=lambda event=None: self.rerun_test()
+            command=lambda event=None: self.rerun_test_button()
         )
         self.menu.add_separator()
         self.menu.add_command(
@@ -1177,19 +1265,26 @@ class TestsTree(ttk.Treeview):
             return
         self.populate_tree(self.obj, self.obj_type, self.class_name)
 
-    def populate_tree(self, obj: str, obj_type: str, class_name: str) -> None:
+    def populate_tree(
+        self,
+        obj: str,
+        obj_type: str,
+        class_name: Union[str, None]
+    ) -> None:
         """Populates tests tree with data from database"""
         self.obj, self.obj_type, self.class_name = obj, obj_type, class_name
         self.delete(*self.get_children())
         if obj_type == "class method":
-            data = self.master.master.db_manager.get_method_tests(
+            data = self.master.master.db_manager.get_rows_by_method_name(
                 class_name,
                 obj
             )
         elif obj_type == "class":
-            data = self.master.master.db_manager.get_class_tests(obj)
+            data = self.master.master.db_manager.get_rows_by_class_name(obj)
         elif obj_type == "function":
-            data = self.master.master.db_manager.get_function_tests(obj)
+            data = self.master.master.db_manager.get_rows_by_function_name(
+                obj
+            )
     
         for i, data in enumerate(data[::-1]):
             metadata_dict = json.loads(data["metadata"])
@@ -1219,60 +1314,13 @@ class TestsTree(ttk.Treeview):
             file.write(test)
             file.close()
     
-    def rerun_test(self) -> None:
+    def rerun_test_button(self) -> None:
         """Reruns selected test"""
         item = self.focus()
         if not item: return
         test = self.item(item)["tags"][1]
         primary_id = self.item(item)["tags"][0]
-        try:
-            result = self.master.master.cont_manager.run_tests_in_container(
-                test
-            )
-        except Exception as e:
-            self.master.master.logger.error(
-                f"Error occured while running tests: {e}"
-            )
-            return
-        if result["compile_error"]:
-            messagebox.showerror(
-                "Error",
-                "Error occured while compiling tests. "
-                "Please check the log for more details."
-            )
-            self.master.master.logger.error(
-                f"Compiling Error: {result['compile_error']}"
-            )
-            return
-        elif result["errors"]:
-            messagebox.showerror(
-                "Error",
-                "Error occured while running tests. "
-                "Please check the log for more details."
-            )
-            self.master.master.logger.error(
-                f"Running Error: {result['errors']}"
-            )
-            return
-        else:
-            try:
-                self.master.master.db_manager.update_test(
-                    primary_id,
-                    test,
-                    json.dumps(result)
-                )
-                self.master.master.logger.info("Tests successfully re-run.")
-            except Exception as e:
-                messagebox.showerror(
-                    "Error",
-                    "Error occured while updating database. "
-                    "Please check the log for more details."
-                )
-                self.master.master.logger.error(
-                    f"Database Error: {e}"
-                )
-                return
-        self.master.master.refresh()
+        _ = self.master.rerun_test(test, primary_id)
     
     def delete_test(self):
         """Deletes selected test from the database"""
@@ -1287,7 +1335,7 @@ class TestsTree(ttk.Treeview):
             return
         obj = self.item(item)["values"][0]
         prim_id = self.item(item)["tags"][0]
-        data = self.master.master.db_manager.get_row_from_db(prim_id)
+        data = self.master.master.db_manager.get_row_by_id(prim_id)
         metadata = [json.loads(data["metadata"])]
         class_name = data["class"]
         obj_type = "class method" if class_name else "function"
@@ -1300,7 +1348,7 @@ class TestsTree(ttk.Treeview):
         item = self.focus()
         if not item: return
         prim_id = self.item(item)["tags"][0]
-        data = self.master.master.db_manager.get_row_from_db(prim_id)
+        data = self.master.master.db_manager.get_row_by_id(prim_id)
         metadata = json.loads(data["metadata"])
         failures = metadata["failures"]
         fail_window = tk.Toplevel(self)
@@ -1377,6 +1425,7 @@ class TestWindow(tk.Toplevel):
         """Saves changes to the database"""
         modified_test = self.text_frame.get("1.0", tk.END)
         self.master.master.db_manager.edit_test_in_db(test_id, modified_test)
+        self.master.tests_window.refresh()
         self.destroy()
         self.master.show_tests()
 

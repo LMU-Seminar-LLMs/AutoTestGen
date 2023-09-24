@@ -3,7 +3,10 @@ from .constants import MODELS, ADAPTERS
 from typing import Union
 import tiktoken
 
-def set_api_keys(api_key: str, org_key: str) -> None:
+def set_api_keys(
+    api_key: Union[str, None],
+    org_key: Union[str, None]
+) -> None:
     """
     Set the API key, organization key for OpenAI API.
 
@@ -96,8 +99,6 @@ def collect_executed_missing_lines(
     Collects executed, missing lines over all available tests in a set.
     Helper function for compute_coverage.
     """
-    if not test_metadata:
-        return set(), set()
     # Find start, end lines of the object definition
     st, end, _ = find_lines(object_name, object_type, class_name)
     # Collect executed, missing lines over all available tests in a set
@@ -144,7 +145,7 @@ def find_lines(
             lines[index: index + len(target_lines)] == target_lines
         ):
             start_line = index + 1
-            end_line = start_line + len(target_lines)
+            end_line = start_line + len(target_lines) - 1
             break
     return start_line, end_line, obj_source.split("\n")
 

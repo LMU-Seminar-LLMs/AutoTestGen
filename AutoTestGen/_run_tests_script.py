@@ -93,7 +93,7 @@ def run_tests_with_coverage_python(module_dir: str) -> dict:
         temp_json.close()
         os.remove(temp_json.name)
     
-    cov = coverage.Coverage(source=[mod_name], messages=True)
+    cov = coverage.Coverage(source=[mod_name.split(".")[0]], messages=True)
     cov.start()
     result = _run_tests()
     cov.stop()
@@ -118,7 +118,8 @@ def run_tests_with_coverage_python(module_dir: str) -> dict:
             (str(n), err)
             for (n, err) in result.failures
         ]
-        fn = [*json_report["files"].keys()][0]
+        file_names: list[str] = [*json_report["files"].keys()]
+        fn = [fn for fn in file_names if fn.endswith(module_dir)][0]
         test_metadata['executed_lines'] = (
             json_report["files"][fn]['executed_lines']
         )
