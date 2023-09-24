@@ -10,11 +10,13 @@ setup(
     author_email='giorginozadze23@yahoo.com',
     long_description=long_description,
     packages=find_packages(exclude="notebooks"),
-    # Needed for dependencies
     install_requires=[
         "openai",
+        "docker",
+        "python-dotenv",
         "coverage"
     ],
+    package_data={"AutoTestGen": ["_run_tests_script.py"]},
     version='0.1',
     license='MIT',
     description='Automatic Unit Test generation using LLM',
