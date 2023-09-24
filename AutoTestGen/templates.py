@@ -66,16 +66,35 @@ def combine_samples(samples: list[tuple]) -> str:
 
 
 def generate_python_info_sheet(
-        obj_type: str,
-        module_name: str,
-        imports: str,
-        constants: str, 
-        variables: str,
-        local_call_defs: str,
-        class_name: str='',
-        init: str='',
-        class_attributes: str='',
-    ):
+    obj_type: str,
+    module_name: str,
+    imports: str,
+    constants: str, 
+    variables: str,
+    local_call_defs: str,
+    class_name: str='',
+    init: str='',
+    class_attributes: str='',
+) -> str:
+    """
+    Retunrs a string containing info about the module and the object 
+    to test.
+
+    Args:
+        obj_type (str): one of ['class', 'function'].
+        module_name (str): name of the module object is defined in.
+        imports (str): string containing imports made in the module.
+        constants (str): string containing imported constants.
+        variables (str): string containing variables defined 
+            in the module body.
+        local_call_defs (str): string containing relevant definitions
+            of functions and methods used inside the object body.
+    
+    Class specific:
+        class_name (str): name of the class method is defined in.
+        init (str): definition of the __init__ method of the class.
+        class_attributes (str): string containing class attributes.
+    """
     assert obj_type in ["class", "function"]
 
     descr = class_name + " class" if obj_type == "class" else "Function"

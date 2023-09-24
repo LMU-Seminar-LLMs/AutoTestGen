@@ -1,4 +1,5 @@
 import openai
+import logging
 from . import config
 from .container_manager import ContainerManager
 from .templates import list_errors, combine_samples
@@ -9,12 +10,13 @@ from .templates import (
 )
 
 def generate_tests(
-        initial_prompt: list[dict[str, str]],
-        cont_manager: ContainerManager,
-        obj_name: str,
-        temp: float=0.1,
-        n_samples: int=1,
-        max_iter: int=5
+    initial_prompt: list[dict[str, str]],
+    cont_manager: ContainerManager,
+    obj_name: str,
+    temp: float=0.1,
+    n_samples: int=1,
+    max_iter: int=5,
+    logger: logging.Logger=logging.getLogger(__name__)
 ) -> dict:
     """
     Runs the pipeline for generating tests.
@@ -25,7 +27,8 @@ def generate_tests(
         temp (float): Temperature to use for sampling.
         n_samples (int): Number of samples to generate.
         max_iter (int): Maximum number of iterations to run.
-
+        logger (logging.Logger): App logger.
+    
     Returns:
         dict: Dictionary containing:
             - messages (list[dict[str, str]]): List of messages
@@ -36,20 +39,24 @@ def generate_tests(
         ValueError: If the API_KEY or MODEL is not set.
     """
 
-
+    logger.info("Sending initial prompt to OpenAI API ...")
     response = _generate_response(initial_prompt, n_samples, temp)
     result: list[dict] = []
 
     if len(response) > 1:
+        logger.info(f"Received {len(response)} responses from OpenAI API")
         # If n_sample > 1: Preporcessing Step is done:
         #  - Evaluate each response separately and use the information to
         #  - put together initial promt.
         sample_results = []
-        for resp in response: 
+        for i, resp in enumerate(response): 
             # PostProcess response
+            logger.info(f"Postprocessing response {i + 1} ...")
             post = config.ADAPTER.postprocess_resp(resp, obj_name=obj_name)
             # Run response
+            logger.info(f"Running response {i + 1} in container ...")
             test_report = cont_manager.run_tests_in_container(post)
+            logger.info("Observing Results ...")
             if test_report["compile_error"]:
                 result = (
                     "Provided code failed to compile with:\n"
@@ -64,27 +71,31 @@ def generate_tests(
                 result = "Tests were successfully executed."
             sample_results.append((resp, result))
             
-            # Update initial prompt
-            initial_prompt[1]["content"] = COMBINING_SAMPLES_PROMPT.format(
-                initial_prompt=initial_prompt[1]["content"],
-                n_samples=n_samples,
-                combined_samples=combine_samples(sample_results),
-                language=config.ADAPTER.language
-            )
-            # Generate new single response
-            response = _generate_response(initial_prompt, 1, temp)
+        # Update initial prompt
+        logger.info("Combining samples and reprompting API ...")
+        initial_prompt[1]["content"] = COMBINING_SAMPLES_PROMPT.format(
+            initial_prompt=initial_prompt[1]["content"],
+            n_samples=n_samples,
+            combined_samples=combine_samples(sample_results),
+            language=config.ADAPTER.language
+        )
+        # Generate new single response
+        response = _generate_response(initial_prompt, 1, temp)
         
     # Run iterations
     for i in range(max_iter):
+        logger.info(f"Starting Iteration {i + 1} ...")
         # PostProcess
         resp_post = config.ADAPTER.postprocess_resp(
             response[0],
             obj_name=obj_name
         )
         # Run tests
+        logger.info("Running response in container ...")
         test_report = cont_manager.run_tests_in_container(resp_post)
         # Infer
         if test_report["compile_error"]:
+            logger.info("Code failed to compile")
             # If compiling code failed: reprompt
             new_prompt = COMPILING_ERROR_REPROMPT.format(
                 error_msg=test_report["compile_error"],
@@ -96,11 +107,12 @@ def generate_tests(
                     {'role': 'user', 'content': new_prompt}
                 ]
             )
+            logger.info("Reprompting API ...")
             response = _generate_response(initial_prompt, 1, temp)
-            print(f"Starting Iteration" + str(i + 2))
             continue
         
         elif test_report["errors"]:
+            logger.info("Somne of the tests failed to run")
         # Errors occured while running tests: reprompt
             new_prompt = TEST_ERROR_REPROMPT.format(
                 id_error_str=list_errors(test_report["errors"]),
@@ -113,10 +125,11 @@ def generate_tests(
                     {'role': 'user', 'content': new_prompt}
                 ]
             )
+            logger.info("Reprompting API ...")
             response = _generate_response(initial_prompt, 1, temp)
-            print(f"Starting Iteration" + str(i + 2))
             continue
         else:
+            logger.info("Tests were successfully executed")
             break
 
     # If max_iter reached and no valid response: return last resp.
@@ -133,8 +146,7 @@ def _generate_response(
         temp: float
     ) -> list[str]:
     """
-    Generates response from OpenAI API. Helper function for
-        generate_tests_pipeline.
+    Prompts OpenAI API. Helper function for generate_tests_pipeline.
 
     Args:
         messages: List of dicts containing role-content keys.

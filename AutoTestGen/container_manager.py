@@ -6,7 +6,37 @@ from . import _run_tests_script, config
 from .constants import SUFFIXES
 
 class ContainerManager:
+    """
+    Class for managing the docker container.
+    
+    Attributes:
+        repo_dir (str): Path to the selected repo.
+        image_name (str): Name of the docker image to use. [Name:Tag]
+        client (docker.client.DockerClient): Docker client connection.
+
+    Constants:
+        container_name (str) = "autotestgen"
+
+    Importand Methods:
+        start_container: Starts a docker container and mounts the
+            repo_dir as read-only.
+        validate_image_name: Validates wether image exists in docker
+            environment or not.
+        validate_container_requirements: Checks if the container has
+            the required python version.
+        put_file_to_container: Puts a file to the container.
+        get_file_from_container: Gets a file from the container.
+        run_tests_in_container: Runs the tests in the container.
+
+    """
     def __init__(self, image_name: str, repo_dir: str):
+        """
+        Important:
+            - Creates a container with the specified image.
+            - Starts the container.
+            - Checks if the container has the required python version.
+            - Copies the run_tests_script to the container.
+        """
         self.repo_dir = repo_dir
         self.container_name = "autotestgen"
         self.client = self.connect_to_docker_client()
@@ -26,13 +56,29 @@ class ContainerManager:
         )
 
     def validate_image_name(self, image_name: str) -> None:
-        """Validates wether image exists in docker environment or not."""
+        """
+        Validates wether image exists in docker env or not.
+
+        Args:
+            image_name (str): Name of the docker image. [Name:Tag]
+        
+        Raises:
+            ValueError: If the image is not found.
+        """
         images = self.list_avaliable_images()
         if image_name not in images:
             raise ValueError(
                 f"Specified image not found. Avaliable images:\n{images}"
             )
+    
     def validate_container_requirements(self) -> None:
+        """
+        Checks if the container has the required python version.
+        
+        Raises:
+            RuntimeError: If python not installed or version is < 3.9.
+            in the container.
+        """
         resp = self.container.exec_run("python3 --version")
         if resp.exit_code != 0:
             raise RuntimeError("Error occured while checking python version.")
@@ -44,19 +90,21 @@ class ContainerManager:
             )
     
     def connect_to_docker_client(self) -> docker.client.DockerClient:
-        """Connects to the docker client."""
-        try:
-            client = docker.from_env()
-        except docker.errors.DockerException:
-            print("Error occured while connecting to docker client.")
-            raise
+        """
+        Connects to the docker client.
+        
+        Returns:
+            docker.client.DockerClient: Docker client connection.
+        """
+        client = docker.from_env()
         return client
 
     def list_avaliable_images(self) -> list[str]:
         """
         List all the available docker images.
+        
         Returns:
-            list[str]: List of available docker images.
+            list[str]: List of in env available docker images.
         """
         return [image.tags[0] for image in self.client.images.list(all=True)]
 
@@ -72,8 +120,12 @@ class ContainerManager:
         """
         Starts a docker container and mounts the repo_dir as read-only.
         
+        Raises:
+            RuntimeError: If container fails to start.
+        
         Returns:
             docker.client.containers.Container: Container object.
+
         """
         # If container already exists remove it.
         conts = [c.name for c in self.client.containers.list(all=True)]
@@ -84,29 +136,14 @@ class ContainerManager:
         
         # Start container + mount the repo_dir as read-only.
         volumes = {self.repo_dir: {'bind': '/tmp/autotestgen/', 'mode': 'ro'}}
-        try:
-            container = self.client.containers.create(
-                image=self.image_name,
-                name=self.container_name,
-                detach=True,
-                tty=True,
-                volumes=volumes
-            )
-        except docker.errors.ImageNotFound:
-            print("Specified Image not found.")
-        except docker.errors.APIError:
-            print("API returned an error while creating a container.")
-            raise
-        except Exception:
-            print("An unexpected error occured while creating a container.")
-            raise
-
-        # Start the container
-        try:
-            container.start()
-        except docker.errors.APIError:
-            print("API returned an error while starting the container.")
-            raise
+        container = self.client.containers.create(
+            image=self.image_name,
+            name=self.container_name,
+            detach=True,
+            tty=True,
+            volumes=volumes
+        )
+        container.start()
         # Update status
         container.reload()
         if self.get_container_status() != "running":
@@ -129,7 +166,7 @@ class ContainerManager:
 
         Important:
             Creates a tarfile in memory and sends it to the container
-                via BytesIO.
+            via BytesIO.
         """
 
         stream = BytesIO()
@@ -147,11 +184,8 @@ class ContainerManager:
                 path=dir_in_container,
                 data=stream.getvalue()
             )
-        except docker.errors.APIError:
-            print("API error while putting the file to container.")
-            raise
-        except Exception:
-            print("Unexpected error while putting the file to container.")
+        except:
+            print("Error occured while putting the file to container.")
             raise
         finally:
             stream.close()
@@ -164,8 +198,8 @@ class ContainerManager:
             path_in_container (str): Path to the file in the container.
         
         Important:
-            Creates a tarfile in memory and writes contents from the file
-                locatedin container via BytesIO.
+            Creates a tarfile in memory and writes contents from the
+            file located in container via BytesIO.
 
         Returns:
             str: Content of the file.
@@ -176,7 +210,7 @@ class ContainerManager:
         except docker.errors.APIError:
             print("API error while getting the file from container.")
             raise
-        except Exception:
+        except Exception as e:
             print("Unexpected error while getting the file from container.")
             raise
         
@@ -195,6 +229,7 @@ class ContainerManager:
         finally:
             stream.close()
             tar.close()
+        
         return content
 
     def run_tests_in_container(self, test_source: str) -> dict:
@@ -208,6 +243,10 @@ class ContainerManager:
             dict: Dictionary containing the test results and coverage
                 data. Check the _run_tests_script.py for the structure
                 of the dict.
+
+        Raises:
+            ValueError: If ADAPTER is not set.
+            RuntimeError: If running tests in container fails.
         """
         if config.ADAPTER is None:
             raise ValueError("ADAPTER is not set. Call set_app_config first.")
@@ -244,8 +283,12 @@ class ContainerManager:
             raise
 
         if resp.exit_code != 0:
-            print("Error occured while running the tests.")
-            raise RuntimeError(resp.output.decode("utf-8"))
+            raise RuntimeError(
+                (
+                    "Running tests in container failed with following error: "
+                    + resp.output.decode("utf-8")
+                )
+            )
         
         json_report = self.get_file_from_container(
             "/autotestgen/test_metadata.json"

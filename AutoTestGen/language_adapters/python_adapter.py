@@ -65,7 +65,7 @@ class PythonAdapter(BaseAdapter):
         
         # check if coverage package is installed.
         if container.exec_run("coverage --version").exit_code != 0:
-            return "coverage is not installed in the container"
+            return "coverage library is not installed in the container."
         
         # Check if all necessary dependencies are installed.
         check_import = container.exec_run(
@@ -204,7 +204,7 @@ class PythonAdapter(BaseAdapter):
                 self.sourced_module
             )
 
-            if has_init and method_name == "__init__":
+            if has_init and method_name != "__init__":
                 init = self.retrieve_classmethod_source(obj_name, "__init__")
             else:
                 init = ''

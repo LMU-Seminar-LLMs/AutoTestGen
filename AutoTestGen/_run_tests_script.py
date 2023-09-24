@@ -1,18 +1,16 @@
 #!/usr/bin/env python
 """
-This script will be copied to '/app/autotestgen' directory
-in the container and executed from there, in order to
-avoid any malicious code execution in the local machine.
+This script will be copied to '/app/autotestgen' directory in the
+container and executed from there, in order to avoid any malicious
+code execution on the local machine.
 
 Parameters:
     - sys.argv[1]: Name of the language.
     - sys.argv[2]: Path to the module/script to test.
 
-    
 Important:
-    - Every runner (function for running test for certain programming
-        language) contained in runner_dict should return a
-        dictionary containing:
+    - Every runner (function for running tests for certain programming
+    language) contained in runner_dict should return a dict containing:
         - 'tests_ran_n' (int): Number of tests that ran.
         - 'errors' (list[tuple(str, str)]): A list of tuples containing
             (test_id, traceback) for tests with errors.
@@ -24,8 +22,7 @@ Important:
             based on entire module/script.
         - 'compile_error' (str): If there is a problem compiling
             the code provided by ChatGPT, this key is set to the
-            error message.
-
+            error message. Otherwise, it is set to None.
 """
 import sys, os, importlib.util, traceback
 import tempfile, json
@@ -43,7 +40,7 @@ def run_tests_with_coverage_python(module_dir: str) -> dict:
 
     Important:
         - GPT generated code is already put in the container, under
-            the filename 'test_source.py'.
+            the filename '/autotestgen/test_source.py'.
     """
     
     def _run_tests() -> Union[unittest.TestResult, str]:
@@ -51,9 +48,10 @@ def run_tests_with_coverage_python(module_dir: str) -> dict:
         Runs the tests and returns the result.
 
         Returns:
-            str: error message, if there is a problem compiling
+            (unittest.TestResult): result of the tests if there is no
+                problem compiling the GPT generated code.
+            (str): error message, if there is a problem compiling the
                 GPT generated code.
-            unittest.TestResult: result of the tests.
         """
         try:
             spec = importlib.util.spec_from_file_location(
@@ -129,7 +127,9 @@ def run_tests_with_coverage_python(module_dir: str) -> dict:
         )
         test_metadata['compile_error'] = None
     except:
-        print("Error occured while writing coverage data in the container.")
+       raise Exception(
+           "Error occured while writing coverage data in the container."
+        )
     return test_metadata
 
 
