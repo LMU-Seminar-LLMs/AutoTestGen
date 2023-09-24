@@ -1,9 +1,14 @@
 #!/usr/bin/env python
 
 """
-This script will be copied to the container (after connecting to container )and run there to avoid any mallicious code execution on the local machine.
-The code provided by ChatGPT is as well copied to the container as a 'test_source.{suffix}' file.
+This script will be copied to the container (after connecting to container) \
+and run there to avoid any mallicious code execution in the local machine.
+The code provided by ChatGPT is as well copied to the container \
+as a 'test_source.{suffix}' file.
 Both are stored in the '/app/' directory of the container.
+Parameters:
+    - sys.argv[1]: Name of the language adapter to use.
+    - sys.argv[2]: Name of the module or script to test.
 """
 import tempfile
 import sys
@@ -82,8 +87,14 @@ def run_tests_with_coverage_python(mod_name: str):
 
         # Prepare metadata
         test_metadata['tests_ran_n'] = result.testsRun
-        test_metadata['errors'] = result.errors
-        test_metadata["failures"] = result.failures
+        test_metadata['errors'] = [
+            (str(n), err)
+            for (n, err) in result.errors
+        ]
+        test_metadata["failures"] = [
+            (str(n), err)
+            for (n, err) in result.failures
+        ]
         fn = [*json_report["files"].keys()][0]
         test_metadata['executed_lines'] = json_report["files"][fn]['executed_lines']
         test_metadata['missing_lines'] = json_report["files"][fn]['missing_lines']

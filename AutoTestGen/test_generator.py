@@ -4,8 +4,13 @@ from io import BytesIO
 import tarfile, tempfile, json, os
 from typing import Type
 from . import language_adapters
-from .constants import MODELS, ADAPTERS
-from .templates import COMPILING_ERROR_REPROMPT, TEST_ERROR_REPROMPT, list_errors
+from .constants import MODELS, ADAPTERS, SUFFIXES
+from .templates import list_errors, combine_samples
+from .templates import (
+    COMPILING_ERROR_REPROMPT,
+    TEST_ERROR_REPROMPT,
+    COMBINING_SAMPLES_PROMPT
+)
 from . import _run_tests_script
 
 class TestGenerator:
@@ -37,60 +42,101 @@ class TestGenerator:
     def generate_tests_pipeline(
         cls,
         initial_prompt: list[dict],
-        obj_name: str=None,
+        obj_name: str,
         temp: float=0.1,
         n_samples: int=1,
         max_iter: int=5
-    ) -> str:
+    ) -> dict:
         
         cls._check_authentication()
         cls._check_model()
 
-        # Get initial prompt
-        messages = initial_prompt
-        # User setting
-        responses = cls._generate_tests(messages, n_samples, temp)
+        # Initial Prompting
+        response = cls._generate_tests(initial_prompt, n_samples, temp)
+        result: list[dict] = []
 
-        results: list[dict] = [dict() for _ in range(n_samples)]
-        for i, resp in enumerate(responses):
-            resp_str = cls._adapter.postprocess_response(resp, obj_name=obj_name)
-            for iter in range(max_iter):
-                test_report = cls.run_tests_in_container(resp_str)
+        if len(response) > 1:
+            # Combine all responses as pre-processing step
+            sample_results = []
+            error_pre = "Executing tests failed with the following error:\n"
+            success_pre = "Tests were succesfully executed."
+            for resp in response:
+                post = cls._adapter.postprocess_resp(
+                    resp,
+                    obj_name=obj_name
+                )
+                test_report = cls.run_tests_in_container(post)
                 if test_report["compile_error"]:
-                    # If compiling code failed: reprompt
-                    new_prompt = COMPILING_ERROR_REPROMPT.format(
-                        error_msg=test_report["compile_error"],
-                        language=cls._adapter.language
-                    )
-                    messages.extend(
-                        [
-                            {'role': 'assistant', 'content': resp_str},
-                            {'role': 'user', 'content': new_prompt}
-                        ]
-                    )
-                    resp_str = cls._generate_tests(messages, 1, temp)[0]
-                    print(f'Iteration {iter}:\n{resp_str}')
-                
+                    result = error_pre + test_report["compile_error"]
                 elif test_report["errors"]:
-                # If compiling code succeeded:
-                    new_prompt = TEST_ERROR_REPROMPT.format(
-                        id_error_str=list_errors(test_report["errors"]),
-                        language=cls._adapter.language
-                    )
-
-                    # If errors occured
-                    messages.extend(
-                        [
-                            {'role': 'assistant', 'content': resp_str},
-                            {'role': 'user', 'content': new_prompt}
-                        ]
-                    )
-                    resp_str = cls._generate_tests(messages, 1, temp)[0]
+                    result = error_pre + list_errors(test_report["errors"])
                 else:
-                    # If no errors occured
-                    results[i].update({"messages": messages, "test": resp_str, "report": test_report})
-                    break
-        return results
+                    result = success_pre
+                sample_results.append((resp, result))
+            
+            # Modifying user prompt
+            initial_prompt[1]["content"] = COMBINING_SAMPLES_PROMPT.format(
+                initial_prompt=initial_prompt[1]["content"],
+                n_samples=n_samples,
+                combined_samples=combine_samples(sample_results),
+                language=cls._adapter.language
+            )
+            response = cls._generate_tests(initial_prompt, 1, temp)
+            
+            print(f"Combined samples:\n{initial_prompt}")
+            print(f"Combined response:\n{response[0]}")
+        
+        for iter in range(max_iter):
+            # PostProcess
+            resp_post = cls._adapter.postprocess_resp(
+                response[0],
+                obj_name=obj_name
+            )
+            # Evaluate
+            test_report = cls.run_tests_in_container(resp_post)
+            # Infer
+            if test_report["compile_error"]:
+                # If compiling code failed: reprompt
+                new_prompt = COMPILING_ERROR_REPROMPT.format(
+                    error_msg=test_report["compile_error"],
+                    language=cls._adapter.language
+                )
+                initial_prompt.extend(
+                    [
+                        {'role': 'assistant', 'content': resp_post},
+                        {'role': 'user', 'content': new_prompt}
+                    ]
+                )
+                response = cls._generate_tests(initial_prompt, 1, temp)
+                print(f'Iteration {iter}:\n{response[0]}')
+            
+            elif test_report["errors"]:
+            # Errors occured while running tests: reprompt
+                new_prompt = TEST_ERROR_REPROMPT.format(
+                    id_error_str=list_errors(test_report["errors"]),
+                    language=cls._adapter.language
+                )
+                # If errors occured
+                initial_prompt.extend(
+                    [
+                        {'role': 'assistant', 'content': resp_post},
+                        {'role': 'user', 'content': new_prompt}
+                    ]
+                )
+                response = cls._generate_tests(initial_prompt, 1, temp)
+                print(f'Iteration {iter}:\n{response[0]}')
+            
+            else:
+                # If no errors occured break loop 
+                break
+
+        # If max_iter reached and no valid response: return last response.
+        result = {
+            "messages": initial_prompt,
+            "test": resp_post,
+            "report": test_report
+        }
+        return result
 
     @classmethod
     def connect_to_container(cls, repo_dir:str, image: str="autotestgen:latest", cont_name: str="autotestgen") -> None:
@@ -198,16 +244,17 @@ class TestGenerator:
     
     @classmethod
     def run_tests_in_container(cls, test_source: str) -> dict:
-        # write test_source to tempfile and move to container
+        """Runs tests in container and returns json report"""
         cls._check_container()
         cls._check_adapter()
+        suffix = SUFFIXES[cls._adapter.language]
         try:
-            with tempfile.NamedTemporaryFile(mode="w", suffix=cls._adapter.suffix, delete=False) as temp_file:
+            with tempfile.NamedTemporaryFile(mode="w", suffix=suffix, delete=False) as temp_file:
                 temp_file.write(test_source)
                 temp_fn = temp_file.name
                 temp_file.close()
                 print(os.path.isfile(temp_fn))
-                cls.put_file_to_container(temp_fn, "/app/", arcname=f"test_source{cls._adapter.suffix}")
+                cls.put_file_to_container(temp_fn, "/app/", arcname=f"test_source{suffix}")
         except Exception:
             print("An unexpected error occurred while writing to temp file")
             raise
@@ -225,12 +272,15 @@ class TestGenerator:
         # get json report from container
         if 'json file successfully written.' in respond.output.decode("utf-8"):
             try:
-                json_report = cls.get_file_content_from_container("/app/test_metadata.json")
+                json_report = cls.get_file_content_from_container(
+                    "/app/test_metadata.json"
+                )
             except:
                 print("Getting json report from container failed.")
                 raise
         else:
-            raise Exception("Running tests in container failed.")
+            print(cls._container.logs())
+            raise Exception("Error while running tests in container.")
         report_dict = json.loads(json_report)
         return report_dict
     

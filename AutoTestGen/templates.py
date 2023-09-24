@@ -1,26 +1,57 @@
+INITIAL_SYSTEM_PROMPT: str = (
+    "Generate high-quality comprehensive unit tests in {language} "
+    "using {framework} library for provided {obj_desc}.\n"
+    "Next to the definition you will be provided with numbered INFO sheet "
+    "that might be useful in generating finer tests.\n"
+    "You do not necessarily need to use all of the INFO sheet, use only "
+    "relevant parts of it.\nYour response should be just a valid {language} "
+    "code without explanation or any other text.\n"
+)
 
-INITIAL_SYSTEM_PROMPT: str = """Generate high-quality comprehensive unit tests in {language} \
-using {framework} library for provided {obj_desc}.
-Next to the definition you will be provided with numbered INFO sheet that might be useful in generating finer tests.
-You do not necessarily need to use all of the INFO sheet, use only relevant parts of it.
-Your response should be just a valid {language} code without explanation or any other text.
-{additional_info}"""
+INITIAL_USER_PROMPT: str = (
+    "{obj_type} Definition:\n{source_code}\n\nINFO sheet:\n{info_sheet}"
+)
 
-INITIAL_USER_PROMPT: str = "{obj_type} Definition:\n{source_code}\n\nINFO sheet:\n{info_sheet}"
+COMPILING_ERROR_REPROMPT: str = (
+    "The code that you have provided failed to compile with the following "
+    "error:\n{error_msg}\nTry to fix the error and resubmit your response.\n"
+    "Your response should still be just a valid {language} code without "
+    "explanation or any other text."
+)
 
-COMPILING_ERROR_REPROMPT: str = """The code that you have provided failed to compile \
-with the following error:\n{error_msg}\nTry to fix the error and resubmit your response.
-Your response should still be just a valid {language} code without explanation or any other text."""
+TEST_ERROR_REPROMPT: str = (
+    "While running the tests following errors occured:\n{id_error_str}"
+    "Try to fix them and resubmit your response.\nYour response should still "
+    "be just a valid {language} code without explanation or any other text."
+)
 
-TEST_ERROR_REPROMPT: str = """While running the tests following errors occured:
-{id_error_str}Try to fix them and resubmit your response.
-Your response should still be just a valid {language} code without explanation or any other text."""
+COMBINING_SAMPLES_PROMPT: str = (
+    "For the following prompt:\n{initial_prompt}\nYou have generated "
+    "following {n_samples} responses, which have resulted in the subsequent "
+    "outcomes:\n{combined_samples}\nConsidering all the provided responses "
+    "and their corresponding outcomes, generate a single best response. "
+    "Your response should still be just a valid {language} code without "
+    "explanation or any other text."
+)
 
 def list_errors(errors: list[tuple[str, str]]) -> str:
-    error_str = ""
-    for i, (test_id, error_msg) in enumerate(errors):
-        error_str += f"{i+1}. Test {test_id} failed with error: {error_msg}\n"
+    error_str = "\n".join(
+        [
+            f"{i}. Test {test_id} failed with error: {error_msg}"
+            for i, (test_id, error_msg) in enumerate(errors, start=1)    
+        ]
+    )
     return error_str
+
+def combine_samples(samples: list[tuple]) -> str:
+    combined_str = "\n".join(
+        [
+            f"{i}. Response:\n{resp}\nResult: {result}"
+            for i, (resp, result) in enumerate(samples, start=1)    
+        ]
+    )
+    return combined_str
+
 
 def generate_python_info_sheet(
         obj_type: str,

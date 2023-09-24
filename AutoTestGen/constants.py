@@ -14,3 +14,9 @@ ADAPTERS: dict[str, Type[language_adapters.BaseAdapter]] = {
     "r": language_adapters.RAdapter,
     "java": language_adapters.JavaAdapter
 }
+
+SUFFIXES: dict[str, str] = {
+    "python": ".py",
+    "r": ".r",
+    "java": ".java"
+}

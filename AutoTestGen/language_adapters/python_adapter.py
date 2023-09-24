@@ -3,7 +3,251 @@ import ast, os, inspect, re
 import importlib, importlib.util
 from typing import Union
 from types import ModuleType
-from ..templates import INITIAL_SYSTEM_PROMPT, INITIAL_USER_PROMPT, generate_python_info_sheet
+from ..templates import generate_python_info_sheet
+from ..templates import INITIAL_SYSTEM_PROMPT, INITIAL_USER_PROMPT
+
+
+
+class PythonAdapter(BaseAdapter):
+    def __init__(self, module: str, testing_framework: str="unittest"):
+        if module.startswith("/"): 
+            self.mod_name = module[1:-3].replace('/', '.')
+        else:
+            self.mod_name = module[:-3].replace('/', '.')
+        super().__init__("python", testing_framework, self.mod_name)
+        self.suffix = ".py"
+        self.sourced_module = self._source_module(module)
+        self.code_analyser = CodeAnalyser(self.sourced_module)
+
+    def retrieve_module_source(self) -> str:
+        return inspect.getsource(self.sourced_module)
+
+    def retrieve_func_defs(self) -> list:
+        return self.code_analyser.body_func_names
+
+    def retrieve_class_defs(self) -> list:
+        return self.code_analyser.body_class_names
+    
+    def retrieve_class_methods(self, class_name: str) -> list:
+        class_node = self.code_analyser.body_class_nodes[
+            self.code_analyser.body_class_names.index(class_name)
+        ]
+        method_nodes = [
+            subn
+            for subn in class_node.body
+            if isinstance(subn, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        method_names = [method.name for method in method_nodes]
+        return method_names
+
+    def retrieve_func_source(self, func_name: str) -> str:
+        return inspect.getsource(getattr(self.sourced_module, func_name))
+    
+    def retrieve_class_source(self, class_name: str) -> str:
+        return inspect.getsource(getattr(self.sourced_module, class_name))
+    
+    def retrieve_classmethod_source(
+            self,
+            class_name: str,
+            method_name: str
+        ) -> str:
+        return inspect.getsource(
+            getattr(getattr(self.sourced_module, class_name), method_name)
+        )
+
+    def check_reqs_in_container(self, container) -> Union[str, None]:
+        # Check python version.
+        vers = container.exec_run("python --version").output.decode("utf-8")
+        major, minor = re.search(r"(\d+\.\d+)", vers).group(1).split(".")
+        if int(major) < 3 or int(minor) < 9:
+            return f"Python version should be >= 3.9, it is {major}.{minor}"
+        
+        # check if coverage package is installed.
+        if container.exec_run("coverage --version").exit_code != 0:
+            return "coverage is not installed in the container"
+        
+        # Check if all necessary dependencies are installed.
+        check_import = container.exec_run(
+            f"python -c 'import {self.mod_name}'",
+            workdir="/tmp/autotestgen/"
+        )
+        if check_import.exit_code != 0:
+            resp = check_import.output.decode("utf-8").split("\n")
+            if any(
+                [ln for ln in resp if ln.startswith("ModuleNotFoundError")]
+            ):
+                return (
+                    "There is a missing dependency in the container. "
+                    "Please intall it first.\n" 
+                    + "\n".join(resp)
+                )
+            else:
+                return (
+                    "Sourcing module in the container failed "
+                    "with the following error:\n"
+                    + "\n".join(resp)
+                )
+        return None
+
+    def prepare_prompt(self, obj_name: str, method_name: str=None):
+        objs = (
+            self.code_analyser.body_func_names
+            + self.code_analyser.body_class_names
+        )
+        if obj_name not in objs:
+            raise ValueError(
+                f"No definiton: {obj_name} in {self.mod_name} module"
+            )
+        
+        # Two cases: Function or Class
+        if (obj_name in self.code_analyser.body_func_names and
+             method_name is None):
+            obj_type = "Function"
+            obj_desc = "Function Definition"
+            node = self.code_analyser.retrieve_func_node(obj_name)
+            source_code = self.retrieve_func_source(obj_name)
+            relevant_calls = self.code_analyser.get_local_calls(node)
+            local_call_defs = self.code_analyser.get_local_defs_str(
+                relevant_calls
+            )
+
+            info_sheet = generate_python_info_sheet(
+                obj_type = obj_type,
+                module_name=self.mod_name,
+                imports=self.code_analyser.imports_string,
+                constants=self.code_analyser.imported_constants_str,
+                variables=self.code_analyser.variables_string,
+                local_call_defs=local_call_defs
+            )
+        
+        elif (obj_name in self.code_analyser.body_class_names and
+               method_name is not None):
+            obj_type = "Class"
+            obj_desc = f"Method Definition of a class called: {obj_name}"
+            class_node = self.code_analyser.retrieve_class_node(obj_name)
+            method_node = self.code_analyser.retrieve_func_node(
+                obj_name,
+                method_name
+            )
+            source_code = self.retrieve_classmethod_source(
+                obj_name,
+                method_name
+            )
+            
+            if self.code_analyser._has_init(
+                obj_name,self.sourced_module,
+                omit=method_name
+            ):
+                init = self.retrieve_classmethod_source(obj_name, "__init__")
+            else:
+                init = ''
+
+            class_attributes = self.code_analyser.get_body_variables_str(
+                class_node
+            )
+            relevant_calls = self.code_analyser.get_local_calls(
+                method_node,
+                method=True,
+                class_name=obj_name
+            )
+
+            local_call_defs = self.code_analyser.get_local_defs_str(
+                relevant_calls,
+                omit=method_name
+            )
+
+            info_sheet = generate_python_info_sheet(
+                obj_type = obj_type,
+                module_name=self.mod_name,
+                imports=self.code_analyser.imports_string,
+                constants=self.code_analyser.imported_constants_str,
+                variables=self.code_analyser.variables_string,
+                local_call_defs=local_call_defs,
+                class_name=obj_name,
+                init=init,
+                class_attributes=class_attributes
+            )
+
+        # Prepare system PROMPT
+        
+        system_prompt = INITIAL_SYSTEM_PROMPT.format(
+            language=self.language,
+            framework=self.framework,
+            obj_desc= obj_desc
+        )
+
+        # Prepare system PROMPT
+        user_prompt = INITIAL_USER_PROMPT.format(
+            obj_type= "Function "if obj_type == "Function" else "Method",
+            source_code=source_code,
+            info_sheet=info_sheet
+        )
+
+        messages = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt}
+        ]
+        return messages
+    
+    def postprocess_resp(self, test: str, **kwargs) -> str:
+        """
+        Postprocesses the test string returned by the API.
+
+        Parameters:
+            test (str): The response string returned
+                by the OpenAI API.
+            **kwargs:
+                obj_name (str): Name of the obj (class, func) to test.
+        """
+        obj_name= kwargs.get('obj_name')
+        
+        # Making sure that tested object is imported.
+        test_lines = test.split("\n")
+        import_string = f"from {self.mod_name} import {obj_name}"
+        import_asterisk = f"from {self.mod_name} import *"
+        if (not import_string in test_lines and
+             not import_asterisk in test_lines):
+            test_lines.insert(0, import_string)
+
+        # Making sure script is only executed when ran from main.
+        if not "if __name__ == '__main__':" in test_lines:
+            test_lines.append("if __name__ == '__main__':")
+            test_lines.append("    unittest.main()")
+
+        # GPT-4 very often wraps response in ```python``` code block
+        # and adds extra explanation lines even though
+        # explicilty asked not to
+        if "```python" in test_lines:
+            start_index = test_lines.index("```python")
+            end_index = test_lines.index("```")
+            test_lines = test_lines[start_index+1:end_index]
+        return "\n".join(test_lines)
+
+    def _source_module(self, module: str) -> ModuleType:
+        """
+        Helper function for sourcing a module from a path.
+
+        Parameters:
+            module (str): Path to the module.
+        
+        Returns:
+            ModuleType: Sourced module.
+        
+        Raises:
+            Exception: If the module is not a python file
+                or cannot be imported.
+        """
+        if not module.endswith(self.suffix):
+            raise Exception(
+                f"Module should be a python file with {self.suffix} extension"
+            )
+        try:
+            sourced_module = importlib.import_module(self.mod_name)
+        except Exception:
+            print(f"Error while importing module: {module}")
+            raise
+        return sourced_module
+
 
 
 class AstVisitor(ast.NodeVisitor):
@@ -121,7 +365,7 @@ class AstVisitor(ast.NodeVisitor):
             return node.value
 
 
-class PromptPreparer:
+class CodeAnalyser:
     def __init__(self, sourced_module: ModuleType):
         # Start-up
         self.sourced_module = sourced_module
@@ -318,185 +562,4 @@ class PromptPreparer:
         for submodule in submodules:
             sourced_module = getattr(sourced_module, submodule)
         return inspect.getsource(sourced_module)
-
-
-class PythonAdapter(BaseAdapter):
-    suffix = ".py"
-    def __init__(self, module: str, testing_framework: str="unittest"):
-        super().__init__(language="python", testing_framework=testing_framework)
-        
-        # Id attributes
-        self.module = module
-        if module.startswith("/"): 
-            self.mod_name = module[1:].replace('/', '.')[:-3]
-        else:
-            self.mod_name = module[:-3].replace('/', '.')
-        
-        print(self.mod_name)
-        self.suffix = self.__class__.suffix
-
-        # PromptPreparer
-        self.sourced_module = self._source_module(module)
-        self.prompt_preparer = PromptPreparer(self.sourced_module)
-
-
-    def retrieve_func_defs(self):
-        """Returns list of function names avaliable in module/script Body"""
-        return self.prompt_preparer.body_func_names
-
-    def retrieve_class_defs(self):
-        """Returns list of class names avaliable in module/script Body"""
-        return self.prompt_preparer.body_class_names
-    
-    def retrieve_class_methods(self, class_name: str):
-        """Returns list of methods of a class given a class name"""
-        class_node = self.prompt_preparer.body_class_nodes[self.prompt_preparer.body_class_names.index(class_name)]
-        method_nodes = [subn for subn in class_node.body if isinstance(subn, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        method_names = [method.name for method in method_nodes]
-        return method_names
-    
-    def retrieve_module_source(self) -> str:
-        """Returns source code of a module"""
-        return inspect.getsource(self.sourced_module)
-
-    def retrieve_func_source(self, func_name: str) -> str:
-        """Returns source code of a function definiton given a function name"""
-        return inspect.getsource(getattr(self.sourced_module, func_name))
-    
-    def retrieve_class_source(self, class_name: str) -> str:
-        """Returns source code of a class definition given a class name"""
-        return inspect.getsource(getattr(self.sourced_module, class_name))
-    
-    def retrieve_classmethod_source(self, class_name: str, method_name: str) -> str:
-        """Returns source code of a method definition given a class name and method name"""
-        return inspect.getsource(getattr(getattr(self.sourced_module, class_name), method_name))
-
-    def prepare_prompt(self, obj_name: str, method_name: str=None):
-        if obj_name not in self.prompt_preparer.body_func_names + self.prompt_preparer.body_class_names:
-            raise ValueError(f"There is no class or function definition called: {obj_name} in the {self.module}")
-        
-        # Two cases: Function or Class
-        if obj_name in self.prompt_preparer.body_func_names and method_name is None:
-            obj_type = "Function"
-            obj_desc = "Function Definition"
-            node = self.prompt_preparer.retrieve_func_node(obj_name)
-            source_code = self.retrieve_func_source(obj_name)
-            relevant_calls = self.prompt_preparer.get_local_calls(node)
-            local_call_defs = self.prompt_preparer.get_local_defs_str(relevant_calls)
-
-            info_sheet = generate_python_info_sheet(
-                obj_type = obj_type,
-                module_name=self.mod_name,
-                imports=self.prompt_preparer.imports_string,
-                constants=self.prompt_preparer.imported_constants_str,
-                variables=self.prompt_preparer.variables_string,
-                local_call_defs=local_call_defs
-            )
-        
-        elif obj_name in self.prompt_preparer.body_class_names and method_name is not None:
-            obj_type = "Class"
-            obj_desc = f"Method Definition of a class called: {obj_name}"
-            class_node = self.prompt_preparer.retrieve_class_node(obj_name)
-            method_node = self.prompt_preparer.retrieve_func_node(obj_name, method_name)
-            source_code = self.retrieve_classmethod_source(obj_name, method_name)
-            
-            if self.prompt_preparer._has_init(obj_name, self.sourced_module, omit=method_name):
-                init = self.retrieve_classmethod_source(obj_name, "__init__")
-            else:
-                init = ''
-
-            class_attributes = self.prompt_preparer.get_body_variables_str(class_node)
-            relevant_calls = self.prompt_preparer.get_local_calls(method_node, method=True, class_name=obj_name)
-            local_call_defs = self.prompt_preparer.get_local_defs_str(relevant_calls, omit=method_name)
-            info_sheet = generate_python_info_sheet(
-                obj_type = obj_type,
-                module_name=self.mod_name,
-                imports=self.prompt_preparer.imports_string,
-                constants=self.prompt_preparer.imported_constants_str,
-                variables=self.prompt_preparer.variables_string,
-                local_call_defs=local_call_defs,
-                class_name=obj_name,
-                init=init,
-                class_attributes=class_attributes
-            )
-
-        # Prepare system PROMPT
-        additional_info =""
-        # additional_info = "Make sure that the script is only executed from the __main__.\n" \
-        #     f"Your response should start with: from {self.mod_name} import {obj_name}"
-        
-        system_prompt = INITIAL_SYSTEM_PROMPT.format(
-            language=self.language,
-            framework=self.framework,
-            obj_desc= obj_desc,
-            additional_info=additional_info
-        )
-
-        # Prepare system PROMPT
-        user_prompt = INITIAL_USER_PROMPT.format(
-            obj_type= "Function "if obj_type == "Function" else "Method",
-            source_code=source_code,
-            info_sheet=info_sheet
-        )
-
-        messages = [
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': user_prompt}
-        ]
-        return messages
-    
-    def postprocess_response(self, test_source: str, **kwargs) -> str:
-        """Adds import statement to the top of the test code in case it is missing"""
-        print(f"Before postprocessing:\n{test_source}")
-        obj_name = kwargs.get('obj_name')
-        # Making sure that tested object is imported
-        test_lines = test_source.split("\n")
-        import_string = f"from {self.mod_name} import {obj_name}"
-        import_asterisk = f"from {self.mod_name} import *"
-        if not import_string in test_lines and not import_asterisk in test_lines:
-            test_lines.insert(0, import_string)
-
-        # Making sure script is only executed when ran from main
-        if not "if __name__ == '__main__':" in test_lines:
-            test_lines.append("if __name__ == '__main__':")
-            test_lines.append("    unittest.main()")
-
-        # GPT-4 very often wraps response in ```python``` code block and adds extra explanation lines even though explicilty asked not to
-        if "```python" in test_lines:
-            start_index = test_lines.index("```python")
-            end_index = test_lines.index("```")
-            test_lines = test_lines[start_index+1:end_index]
-        return "\n".join(test_lines)
-
-    def check_requirements_in_container(self, container) -> Union[str, None]:
-        # check if python version is above 3.9
-        vers = container.exec_run("python --version").output.decode("utf-8")
-        major, minor = re.search(r"(\d+\.\d+)", vers).group(1).split(".")
-        if int(major) < 3 or int(minor) < 9:
-            return f"Python version should be 3.9 or above, but it is {major}.{minor}"
-        # check if coverage is installed
-        if container.exec_run("coverage --version").exit_code != 0:
-            return "coverage is not installed in the container"
-        # check if all necessary dependencies for a module to test are installed
-        check_import = container.exec_run(f"python -c 'import {self.mod_name}'", workdir="/tmp/autotestgen/")
-        if check_import.exit_code != 0:
-            resp = check_import.output.decode("utf-8").split("\n")
-            if any([ln for ln in resp if ln.startswith("ModuleNotFoundError")]):
-                return "There is a missing dependency in the container. Please intall it first.\n" + "\n".join(resp)
-            else:
-                return "Sourcing module in the container failed with the following error:\n" + "\n".join(resp)
-
-    def _source_module(self, module:str):
-        if not module.endswith(self.suffix):
-            raise Exception(f"Module should be a python module with a {self.suffix} extension")
-        try:
-            sourced_module = importlib.import_module(self.mod_name)
-        except Exception:
-            print(f"Error while importing module: {module}")
-            raise
-        return sourced_module
-
-
-
-
 
