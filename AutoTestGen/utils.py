@@ -1,5 +1,6 @@
 from . import config
 from .constants import MODELS, ADAPTERS
+from typing import Union
 import tiktoken
 
 def set_api_keys(api_key: str, org_key: str) -> None:
@@ -56,3 +57,60 @@ def count_tokens(messages: list[dict[str, str]]) -> int:
     encoding = tiktoken.encoding_for_model(config.MODEL)
     num_tokens = [len(encoding.encode(m["content"])) for m in messages]
     return sum(num_tokens)
+
+
+def find_lines(
+    obj: str,
+    obj_type: str,
+    class_name: Union[str, None]=None
+) -> tuple[int, int, list[str]]:
+    """
+    Finds start, end lines of obj definition in module source code.
+
+    Args:
+        obj: name of the object.
+        obj_type: One of ["function", "class", "class method"].
+        class_name: class name if obj_type is class method.
+
+    Returns:
+        tuple of position where source_code starts, ends and source
+            code line by line in a list.
+
+    """
+    if config.ADAPTER is None:
+        raise ValueError("Adapter is not set.")
+    module_source: str = config.ADAPTER.retrieve_module_source()
+    obj_source = _retrieve_source(obj, obj_type, class_name)
+
+    target_lines = [line.strip() for line in obj_source.split("\n")]
+    lines = [line.strip() for line in module_source.split("\n")]
+    
+    for index, _ in enumerate(lines):
+        if (
+            lines[index] == target_lines[0] and 
+            lines[index: index + len(target_lines)] == target_lines
+        ):
+            start_line = index + 1
+            end_line = index + len(target_lines)
+            break
+    return start_line, end_line, obj_source.split("\n")
+
+def _retrieve_source(
+    obj: str,
+    obj_type: str,
+    class_name: Union[str, None]=None
+) -> str:
+    """Helper function for find_lines."""
+    if obj_type == "function":
+        return config.ADAPTER.retrieve_func_source(obj)
+    elif obj_type == "class":
+        return config.ADAPTER.retrieve_class_source(obj)
+    elif obj_type == "class method":
+        return config.ADAPTER.retrieve_classmethod_source(
+            class_name,
+            method_name=obj
+        )
+    else:
+        raise ValueError(
+            "obj_type must be one of ['function', 'class', 'class method']"
+        )

@@ -16,7 +16,6 @@ class PythonAdapter(BaseAdapter):
             self.mod_name = module[1:-3].replace('/', '.')
         else:
             self.mod_name = module[:-3].replace('/', '.')
-
         self.sourced_module = self._source_module(module)
         self.code_analyser = CodeAnalyser(self.sourced_module)
 
@@ -48,10 +47,10 @@ class PythonAdapter(BaseAdapter):
         return inspect.getsource(getattr(self.sourced_module, class_name))
     
     def retrieve_classmethod_source(
-            self,
-            class_name: str,
-            method_name: str
-        ) -> str:
+        self,
+        class_name: str,
+        method_name: str
+    ) -> str:
         return inspect.getsource(
             getattr(getattr(self.sourced_module, class_name), method_name)
         )
@@ -73,7 +72,7 @@ class PythonAdapter(BaseAdapter):
             workdir="/tmp/autotestgen/"
         )
         if check_import.exit_code != 0:
-            resp = check_import.output.decode("utf-8").split("\n")
+            resp: str = check_import.output.decode("utf-8").split("\n")
             if any(
                 [ln for ln in resp if ln.startswith("ModuleNotFoundError")]
             ):
@@ -261,7 +260,6 @@ class PythonAdapter(BaseAdapter):
         return messages
 
 
-
 class AstVisitor(ast.NodeVisitor):
     """
     Class for visiting AST nodes to analyse the code.
@@ -329,11 +327,7 @@ class AstVisitor(ast.NodeVisitor):
                             module_asterisked,
                             inspect.ismodule
                         )
-
-                        module_names = [
-                            name
-                            for name, _ in module_members
-                        ]
+                        module_names = [name for name, _ in module_members]
 
                         self.modules.update(
                             {name: module
@@ -342,7 +336,7 @@ class AstVisitor(ast.NodeVisitor):
                                 name not in module_names}
                         ) 
         else:
-            # Rlative Import from case which is equivalent to simple import.
+            # Rlative ImportFrom case which is equivalent to simple import.
             self.visit_Import(node)
         self.generic_visit(node)
 
@@ -371,7 +365,7 @@ class AstVisitor(ast.NodeVisitor):
                         self.instances[target.id] = func_name
                     else:
                         self.func_names.add(func_name)
-                
+
             elif isinstance(target, ast.Tuple):
                 # Tuple assignment with multiple targets
                 for target_name, value in zip(target.dims, node.value.dims):
@@ -436,10 +430,13 @@ class AstVisitor(ast.NodeVisitor):
         elif isinstance(node, ast.Constant):
             return node.value
 
-
 class CodeAnalyser:
     """Class for analysing the code of a module."""
     def __init__(self, sourced_module: ModuleType):
+        """
+        Args:
+            sourced_module (ModuleType): Sourced module.
+        """
         # Start-up
         self.sourced_module = sourced_module
         self.source_code = inspect.getsource(sourced_module)
@@ -463,6 +460,7 @@ class CodeAnalyser:
 
         # Instance of AstVisitor to go through syntax-tree
         self.ast_visitor = AstVisitor(self.sourced_module)
+        
         # Function and Class definitons of the body are already identified
         # Now we visit the rest of the body nodes using the visitor
         for node in self.syntax_tree.body:
@@ -552,9 +550,9 @@ class CodeAnalyser:
         return imported_consts_str
     
     def get_body_variables_str(
-            self,
-            node: Union[ast.Module, ast.ClassDef]
-        ) -> None:
+        self,
+        node: Union[ast.Module, ast.ClassDef]
+    ) -> None:
         """
         Returns string of body level assignments and additionally
         looks for declarations of variable types which are local and
@@ -576,6 +574,11 @@ class CodeAnalyser:
         
         body_defs = self.body_func_names + self.body_class_names
         for rest_node in rest_nodes:
+            # Ignore docstrings
+            if isinstance(rest_node, ast.Expr):
+                if isinstance(rest_node.value, ast.Constant):
+                    if isinstance(rest_node.value.value, str):
+                        continue
             variables_string += (ast.unparse(rest_node) + '\n')
             # Body Level assignments
             if isinstance(rest_node, ast.Assign):
@@ -607,10 +610,10 @@ class CodeAnalyser:
         return final_string
 
     def retrieve_func_node(
-            self,
-            obj_name: str,
-            method: Union[str, None]=None
-        ) -> Union[ast.FunctionDef, ast.AsyncFunctionDef]:
+        self,
+        obj_name: str,
+        method: Union[str, None]=None
+    ) -> Union[ast.FunctionDef, ast.AsyncFunctionDef]:
         """
         Returns function node given a function name or 
         (class name and method name).
@@ -641,11 +644,11 @@ class CodeAnalyser:
         return self.body_class_nodes[self.body_class_names.index(obj_name)]
 
     def get_local_calls(
-            self,
-            node: Union[ast.FunctionDef, ast.AsyncFunctionDef],
-            method: bool=False,
-            class_name: Union[str, None]=None
-        ) -> set:
+        self,
+        node: Union[ast.FunctionDef, ast.AsyncFunctionDef],
+        method: bool=False,
+        class_name: Union[str, None]=None
+    ) -> set:
         """
         Returns all local calls inside a function or method definition.
 
@@ -750,10 +753,10 @@ class CodeAnalyser:
         return False
     
     def _has_init(
-            self,
-            call_name: str,
-            sourced_module: ModuleType
-        ) -> bool:
+        self,
+        call_name: str,
+        sourced_module: ModuleType
+    ) -> bool:
         """
         Checks if a class associated to call_name has an __init__
             method definition.
@@ -776,10 +779,10 @@ class CodeAnalyser:
         return has_init
     
     def _get_init(
-            self,
-            call_name: str,
-            sourced_module: ModuleType
-        ) -> str:
+        self,
+        call_name: str,
+        sourced_module: ModuleType
+    ) -> str:
         """
         Given a method call name, returns corresponding class 
         __init__ definition.
@@ -796,10 +799,10 @@ class CodeAnalyser:
         return inspect.getsource(getattr(class_object, '__init__'))
 
     def _trace_module(
-            self,
-            module_name: str,
-            sourced_module: ModuleType
-        ) -> ModuleType:
+        self,
+        module_name: str,
+        sourced_module: ModuleType
+    ) -> ModuleType:
         """
         Traces a module recursively until reaching the last submodule.
         
@@ -816,10 +819,10 @@ class CodeAnalyser:
         return sourced_module
     
     def _trace_call(
-            self,
-            call_name: str,
-            sourced_module: ModuleType
-        ) -> str:
+        self,
+        call_name: str,
+        sourced_module: ModuleType
+    ) -> str:
         """
         Helper Function traces a call recursively until reaching
         the function, method definition itself.
@@ -835,4 +838,3 @@ class CodeAnalyser:
         for submodule in submodules:
             sourced_module = getattr(sourced_module, submodule)
         return inspect.getsource(sourced_module)
-

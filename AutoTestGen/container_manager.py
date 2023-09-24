@@ -296,7 +296,7 @@ class ContainerManager:
         report_dict = json.loads(json_report)
         return report_dict
 
-    def close_container(self) -> None:
+    def stop_container(self) -> None:
         """Stops and removes the container."""
         if self.get_container_status() == "running":
             self.container.stop()

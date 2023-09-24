@@ -4,7 +4,12 @@ import sqlite3, os
 
 class IDGenerator:
     def __init__(self, length: int=16):
+        if not isinstance(length, int):
+            raise TypeError("Length must be of type int.")
+        if length < 0:
+            raise ValueError("length mut be a positive")
         self.length = length
+
 
     def generate_id(self) -> str:
         alph = string.ascii_letters + string.digits

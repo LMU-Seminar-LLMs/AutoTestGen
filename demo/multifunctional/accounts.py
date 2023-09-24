@@ -2,10 +2,10 @@ from .id_generator import IDGenerator
 
 
 class Account:
-    def __init__(self, name: str, balance: float, id):
+    def __init__(self, name: str, balance: float):
         self._name = name
         self._balance = balance
-        self.id_generator = IDGenerator(int=16)
+        self.id_generator = IDGenerator(length=16)
         self._id = self.id_generator.generate_id()
     
     @property

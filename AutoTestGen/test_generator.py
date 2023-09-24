@@ -141,10 +141,10 @@ def generate_tests(
     return result
         
 def _generate_response(
-        messages: list[dict[str, str]],
-        n_samples: int,
-        temp: float
-    ) -> list[str]:
+    messages: list[dict[str, str]],
+    n_samples: int,
+    temp: float
+) -> list[str]:
     """
     Prompts OpenAI API. Helper function for generate_tests_pipeline.
 

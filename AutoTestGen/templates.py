@@ -135,7 +135,7 @@ def generate_python_info_sheet(
     if local_call_defs != "":
         info_sheet += (
             f"{n}. Definitons of functions used inside the "
-            f"{'class method' if obj_type=='class' else 'function'}"
+            f"{'class method' if obj_type=='class ' else 'function '}"
             f"body:\n{local_call_defs}"
         )
     return info_sheet

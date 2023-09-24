@@ -4,8 +4,9 @@ import os, sys, subprocess, fnmatch
 from typing import Union
 from dotenv import load_dotenv
 from pathlib import Path
-import sqlite3, json, logging
-from . import ContainerManager, config, utils, generate_tests
+import json, logging
+from . import ContainerManager, DBManager
+from . import config, utils, generate_tests
 from AutoTestGen import MODELS, ADAPTERS, SUFFIXES
 
 class ChatApp:
@@ -18,7 +19,7 @@ class ChatApp:
         app_frame: app frame (AppFrame).
         repo_dir: path to the selected repository (str).
         language: selected language (str).
-        conn: connection to the database (sqlite3.Connection).
+        db_manager: Handles database tasks. (DBManager).
         cont_manager: Handles container tasks. (ContainerManager).
         logger: logger for the app (logging.Logger).
     
@@ -28,7 +29,6 @@ class ChatApp:
         load_app: loads app frame and its widgets.
         reload_intro: clears app frame and reloads intro frame.
         open_repo: Transition from intro frame to app frame.
-        prepare_db: prepares database if not yet avaliable in the repo.
         disconnect: disconnects from the db and stops the container.
         quit: quits the app.
         _clear_widgets: clears all deceased widgets of a frame.
@@ -48,7 +48,7 @@ class ChatApp:
         # Main Technical variables
         self.repo_dir: str
         self.language: str
-        self.conn: Union[sqlite3.Connection, None] = None 
+        self.db_manager: Union[DBManager, None] = None
         self.cont_manager: Union[ContainerManager, None] = None
 
         # Logger
@@ -56,22 +56,11 @@ class ChatApp:
         self.logger.setLevel(logging.INFO)
 
         # Intro Frame
-        self.intro_frame = IntroFrame(
-            self.root,
-            self.logger,
-            width=500,
-            height=500
-        )
-
+        self.intro_frame = IntroFrame(root, self.logger, width=500, height=500)
         # App Frame
-        self.app_frame = AppFrame(
-            self.root,
-            self.logger,
-            width=1028,
-            height=500
-        )
+        self.app_frame = AppFrame(root, self.logger, width=1028, height=500)
         self.load_intro()
-    
+
     def load_intro(self) -> None:
         """Loads intro frame and its widgets."""
         self._center_window(self.root, 500, 500)
@@ -87,16 +76,14 @@ class ChatApp:
         ).pack(pady=5, expand=True)
     
     def load_app(self) -> None:
-        """
-        Loads app frame. Used when opening repository from intro frame.
-        """
+        """Loads app frame and its widgets after selecting repo."""
         sys.path[0] = self.repo_dir
         self._center_window(self.root, 1028, 500)
         self._clear_widgets(self.intro_frame)
         self.app_frame.configure_app(
             self.repo_dir,
             self.language,
-            self.conn,
+            self.db_manager,
             self.cont_manager
         )
         self.app_frame.tkraise()
@@ -160,7 +147,8 @@ class ChatApp:
         
         self.logger.info("Connecting to database...")
         try:
-            self.prepare_db()
+            db_path = os.path.join(self.repo_dir, "autotestgen.db")
+            self.db_manager = DBManager(db_path)
         except Exception as e:
             self.logger.error(
                 f"Error occured while connecting to database: {e}"
@@ -179,75 +167,9 @@ class ChatApp:
             )
             raise
         self.load_app()
-
-    def prepare_db(self) -> None:
-        """
-        Prepares database if not yet avaliable in the selected repo.
-        Otherwise connects to existing one. (autotestgen.db)
-        """
-        db_path = os.path.join(self.repo_dir, "autotestgen.db")
-        if not os.path.isfile(db_path):
-            try:
-                self.conn = sqlite3.connect(db_path)
-            except Exception as e:
-                self.logger.error(
-                    f"Error occured while connecting to database: {e}"
-                )
-                raise
-            cursor = self.conn.cursor()
-            try:
-                cursor.execute(
-                    """
-                        CREATE TABLE tests (
-                            id INTEGER PRIMARY KEY,
-                            module TEXT,
-                            class TEXT,
-                            obj TEXT,
-                            history TEXT,
-                            test TEXT,
-                            coverage_report TEXT
-                        )
-                    """
-                )
-                cursor.execute(
-                    """
-                        CREATE TABLE token_usage (
-                            model TEXT,
-                            input_tokens INTEGER,
-                            output_tokens INTEGER
-                        )
-                    """
-                )
-                query = "INSERT INTO token_usage VALUES (?, ?, ?)"
-                for model in MODELS:
-                    cursor.execute(query, (model, 0, 0))
-                self.conn.commit()
-
-            except Exception as e:
-                self.logger.error(
-                    f"Error occured while creating Tables in database: {e}"
-                )
-                os.remove(db_path)
-                raise
-            finally:
-                cursor.close()
-        else:
-            try:
-                self.conn = sqlite3.connect(db_path)
-            except Exception as e:
-                self.logger.error(
-                    f"Error occured while connecting to database: {e}"
-                )
-                raise
-            self.logger.info("Database Connected")
             
     def _clear_widgets(self, frame: tk.Frame) -> None:
-        """
-        Helper function to clear all deceased widgets of a frame.
-
-        Args:
-            frame: frame to clear (tk.Frame).
-        """
+        """Helper function to clear all deceased widgets of a frame."""
         for widget in frame.winfo_children():
             widget.destroy()
         frame.pack_forget()
@@ -273,12 +195,12 @@ class ChatApp:
     
     def disconnect(self) -> None:
         """Disconnect from the db and stop the container."""
-        if self.conn:
+        if self.db_manager:
             self.logger.info("Disconnecting from db ...")
-            self.conn.close()
+            self.db_manager.close_db()
         if self.cont_manager:
             self.logger.info("Stopping container ...")
-            self.cont_manager.close_container()
+            self.cont_manager.stop_container()
     
     def quit(self) -> None:
         """Quit the app."""
@@ -359,7 +281,7 @@ class AppFrame(ttk.Frame):
         self.repo_dir: str
         self.language: str
         self.suffix: str
-        self.conn: sqlite3.Connection
+        self.db_manager: DBManager
         self.cont_manager: ContainerManager
 
         self.chat_frame: ChatFrame
@@ -372,35 +294,23 @@ class AppFrame(ttk.Frame):
         MenuBar(self.master, self.repo_dir)
         self.chat_frame = ChatFrame(self)
         self.chat_frame.pack(
-            fill="both",
-            side="left",
-            padx=10,
-            pady=5,
-            expand=True
+            fill="both", side="left", padx=10, pady=5, expand=True
         )
         # Refresh Button
         tk.Button(
-            self,
-            text="\u21BB",
-            command=self.refresh,
-            width=2,
-            height=1
+            self, text="\u21BB", command=self.refresh, width=2, height=1
         ).pack(side="left", pady=1, anchor="nw")
 
         self.utils_frame = UtilsFrame(self)
         self.utils_frame.pack(
-            fill="both",
-            side="right",
-            padx=10,
-            pady=5,
-            expand=True
+            fill="both", side="right", padx=10, pady=5, expand=True
         )
     
     def configure_app(
         self,
         repo_dir: str,
         language: str,
-        conn: sqlite3.Connection,
+        db_manager: DBManager,
         cont_manager: ContainerManager
     ) -> None:
         """
@@ -409,18 +319,18 @@ class AppFrame(ttk.Frame):
         Args:
             repo_dir: path to the selected repository (str).
             language: selected language (str).
-            conn: connection to the database (sqlite3.Connection).
-            cont_manager: Handling container tasks (ContainerManager).
+            db_manager: Handles database tasks (DBManager).
+            cont_manager: Handles container tasks (ContainerManager).
         """
         self.repo_dir = repo_dir
         self.suffix = SUFFIXES[language]
         self.language = language
-        self.conn = conn
+        self.db_manager = db_manager
         self.cont_manager = cont_manager
 
     def refresh(self) -> None:
         """Refreshes workstation to update tests and coverage data"""
-        self.utils_frame.workst_tree.refresh()
+        self.utils_frame.refresh()
 
 class MenuBar(tk.Menu):
     """
@@ -463,7 +373,6 @@ class MenuBar(tk.Menu):
         config.API_KEY = None
         config.ORG_KEY = None
         messagebox.showinfo("Status", "Logged-out successfully")
-
 
 class AuthentificationWindow(tk.Toplevel):
     """
@@ -577,7 +486,6 @@ class ChatFrame(ttk.Frame):
         send_message: sends message to API and displays response.
         display_message: displays message in chat history.
         clear_chat: clears chat history.
-        populate_db: populates database with generated tests.
     """
     def __init__(self, master: AppFrame, *args, **kwargs) -> None:
         super().__init__(master, *args, **kwargs)
@@ -592,9 +500,7 @@ class ChatFrame(ttk.Frame):
         self.chat_history.tag_configure("System", foreground="green")
         self.chat_history.pack(fill="both", expand=True)
         self.token_count = ttk.Label(
-            self,
-            text="Token Count: 0",
-            foreground="red"
+            self, text="Token Count: 0", foreground="red"
         )
         self.token_count.pack(anchor="ne")
 
@@ -609,10 +515,7 @@ class ChatFrame(ttk.Frame):
         self.chat_entry.pack(fill="both", side="left", expand=True)
         # Clear Chat Button
         ttk.Button(
-            self,
-            text="\u232B",
-            command=self.clear_chat,
-            width=4
+            self, text="\u232B", command=self.clear_chat, width=4
         ).pack(fill="both", side="right")
         # Send Message Button
         ttk.Button(
@@ -623,7 +526,7 @@ class ChatFrame(ttk.Frame):
                 tag="User"
             )
         ).pack(fill="both", side="right")
-
+        # Model selection
         self.model_box = ttk.Combobox(
             self,
             textvariable=self.model_var,
@@ -633,16 +536,15 @@ class ChatFrame(ttk.Frame):
         )
         self.model_box.pack(fill="both", side="right", expand=True)
         self.model_box.bind(
-            "<<ComboboxSelected>>",
-            lambda event=None: self.select_model()
+            "<<ComboboxSelected>>", lambda event=None: self.select_model()
         )
-    
+
     @property
     def chat_state(self) -> list[dict[str, str]]:
         """Returns chat state"""
         return self._chat_state
 
-    def update_state(self, message: dict[str, str]) -> None:
+    def update_state(self, message: list[dict[str, str]]) -> None:
         """Updates chat state and counts tokens"""
         if len(message) == 1:
             self._chat_state.append(message[0])
@@ -694,6 +596,7 @@ class ChatFrame(ttk.Frame):
         self.master.logger.info(
             f"Object name: {obj_name}, Object type: {obj_type}"
         )
+        
         if obj_type == "class method":
             class_name = self.master.utils_frame.workst_tree.item(
                 self.master.utils_frame.workst_tree.parent(item)
@@ -745,27 +648,17 @@ class ChatFrame(ttk.Frame):
             )
             self.display_message(result["test"], "API")
             
-            # Save token count to database
+            # Save token count to db.
             try:
                 in_tokens = utils.count_tokens(message)
                 out_tok = utils.count_tokens(
                     [{"role": "assistant", "content": result["test"]}]
                 )
-                _, in_total, out_total = self.master.conn.execute(
-                    "SELECT * FROM token_usage WHERE model=?",
-                    (config.MODEL,)
-                ).fetchone()
-                self.master.conn.execute(
-                    """
-                        UPDATE token_usage
-                        SET input_tokens=?,
-                            output_tokens=?
-                        WHERE model=?;
-                    """,
-                    (in_total + in_tokens, out_total + out_tok, config.MODEL)
+                self.master.db_manager.update_token_count(
+                    config.MODEL,
+                    in_tokens,
+                    out_tok
                 )
-                self.master.conn.commit()
-
             except Exception as e:
                 self.master.logger.warning(
                     f"Updating token usage in databse failed: {e}"
@@ -821,13 +714,13 @@ class ChatFrame(ttk.Frame):
         
         else:
             try:
-                self.populate_db(
-                    mod_name=os.path.basename(config.ADAPTER.module),
+                self.master.db_manager.add_tests_to_db(
+                    module=os.path.basename(config.ADAPTER.module),
                     class_name=class_name,
-                    obj_name=obj_name,
+                    object_name=obj_name,
                     history=json.dumps(result["messages"]),
-                    code=result["test"],
-                    coverage=json.dumps(result["report"])
+                    test=result["test"],
+                    metadata=json.dumps(result["report"])
                 )
                 self.master.logger.info(
                     "Tests successfully added to the database"
@@ -836,32 +729,19 @@ class ChatFrame(ttk.Frame):
                 self.master.logger.warning(
                     f"Error occured while populating database: {e}"
                 )
-            
-            # Compute coverage
-            start, end, _ = self.master.utils_frame._find_lines(
-                obj_name,
-                obj_type,
-                class_name
+
+            # Mimic data from database
+            data = [
+                (0, "mod", class_name, obj_name, json.dumps(result["report"]))
+            ]
+            cov = self.master.utils_frame.compute_coverage(
+                data,
+                obj_type="class method" if class_name else "function"
             )
-            ex_lns = [
-                i
-                for i in result["report"]["executed_lines"] 
-                if i >= start and i <= end
-            ]
-            miss_lns = [
-                i
-                for i in result["report"]["missing_lines"]
-                if i >= start and i <= end
-            ]
-            if ex_lns == 0:
-                cov = 0
-            else:
-                cov = len(ex_lns) / (len(ex_lns) + len(miss_lns))
-            
             cov_report = {
                 "n_tests": result["report"]["tests_ran_n"],
                 "failed": len(result["report"]["failures"]),
-                "coverage": int(cov) * 100
+                "coverage": cov
             }
             messagebox.showinfo(
                 "Tests Generated",
@@ -871,6 +751,7 @@ class ChatFrame(ttk.Frame):
                     "object in the Table on the right.\n" + str(cov_report)
                 )
             )
+            self.master.refresh()
         
     def display_message(self, message: str, tag: str) -> None:
         """
@@ -893,42 +774,9 @@ class ChatFrame(ttk.Frame):
         self.chat_history.delete("1.0", tk.END)
         self.chat_history.config(state=tk.DISABLED)
 
-    def populate_db(
-        self,
-        mod_name: str,
-        class_name: str,
-        obj_name: str,
-        history: str,
-        code: str,
-        coverage: str
-    ) -> None:
-        """
-        Populates database with generated tests and coverage report.
-
-        Args:
-            mod_name: name of the module (str).
-            class_name: name of the class (str).
-            obj_name: name of the object (str).
-            history: chat history (str).
-            code: code of generated test (str).
-            coverage: coverage report in json string format.
-        """
-        
-        insert_query = """
-            INSERT INTO tests
-            (module, class, obj, history, test, coverage_report)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """
-        self.master.conn.execute(
-            insert_query,
-            (mod_name, class_name, obj_name, history, code, coverage)
-        )
-        self.master.conn.commit()
-    
     def select_model(self) -> None:
         """Sets model endpoint for API"""
         utils.set_model(self.model_var.get())
-
 
 class UtilsFrame(ttk.Frame):
     """
@@ -945,54 +793,38 @@ class UtilsFrame(ttk.Frame):
     Important Methods:
         select_for_testing: selects object for testing.
         gen_tests: generates tests for selected object.
-        
-
     """
-    def __init__(self, master: AppFrame, *args, **kwargs) -> None:
-        super().__init__(master, *args, **kwargs)
+    def __init__(self, master: AppFrame, **kwargs) -> None:
+        super().__init__(master, **kwargs)
         self.configure(borderwidth=2, relief="groove")
         self.master: AppFrame
         # Pipeline default parameters
         self.temp: float = 0.1
         self.n_samples: int = 1
         self.max_iter: int = 3
-        self.current_mod: Union[str, None] = None
+        self.current_module: Union[str, None] = None
 
-        # Repo FileTree + right-click menu
+        # Repo FileTree
         self.file_tree = FileTree(
-            self, self.master.repo_dir,
-            self.master.suffix,
-            show="tree",
-            columns=["Value"],
-            height=4
+            self,
+            self.master.repo_dir,
+            self.master.suffix
         )
-        self.file_tree.pack(fill="both", expand=True)
-        self.menu = tk.Menu(self, tearoff=0)
-        self.menu.add_command(
-            label="Open",
-            command=lambda event=None: self.open_selected_item()
-        )
-        self.file_tree.bind("<Button-2>", lambda event: self.post_ft(event))
         self.file_tree.bind(
             "<Double-Button-1>",
-            lambda event=None: self.select_for_testing()
+            lambda event=None: self.select_for_testing(self.file_tree.focus())
         )
+        self.file_tree.pack(fill="both", expand=True)
         
-        # WorkstationTree + Right-click menu
-        self.workst_tree = WorkStationTree(self, height=5)
-        self.workst_tree.pack(fill="both", expand=True, pady=5)
-        self.menu_wst = tk.Menu(self, tearoff=0)
-
-        self.menu_wst.add_command(
+        # WorkstationTree
+        self.workst_tree = WorkStationTree(self)
+        self.workst_tree.menu_wst.add_command(
             label="Open Coverage",
             command=self.open_cov_report
         )
         self.workst_tree.bind("<Double-Button-1>", self.show_tests)
-        self.workst_tree.bind(
-            "<Button-2>",
-            lambda event: self.post_wst(event)
-        )
-        
+        self.workst_tree.pack(fill="both", expand=True, pady=5)
+
         # TestsWinow
         self.tests_window = TestsTree(self, height=5)
         self.tests_window.pack(fill="both", expand=True)
@@ -1033,142 +865,94 @@ class UtilsFrame(ttk.Frame):
         )
         usage_button.pack(side="left", padx=5, pady=5, anchor="s")
 
-    def post_ft(self, event: tk.Event) -> None:
-        """Posts right-click menu for file tree"""
-        item_iden = self.file_tree.identify_row(event.y)
-        if item_iden:
-            self.file_tree.focus(item_iden)
-            self.file_tree.selection_set(item_iden)
-            self.menu.post(event.x_root, event.y_root)
-
-    def post_wst(self, event: tk.Event) -> None:
-        """Posts right-click menu for workstation tree"""
-        item_iden = self.workst_tree.identify_row(event.y)
-        if item_iden:
-            self.workst_tree.focus(item_iden)
-            self.workst_tree.selection_set(item_iden)
-            self.menu_wst.post(event.x_root, event.y_root)
+    def refresh(self) -> None:
+        """Refreshes workstation and tests tree"""
+        self.populate_ws_tree()
+        self.tests_window.refresh()
 
     def show_stats(self, x, y) -> None:
         """Shows statistics window"""
-        stats_window = Statistics(x, y, height=300, width=300)
-        stats_window.populate_table(self.master.conn)
+        stats_window = Statistics(self, x, y, height=300, width=300)
+        stats_window.populate_table()
 
     def load_test_state(self, event=None) -> None:
         """Loads test state from the database"""
-        if config.MODEL is None:
-            messagebox.showwarning("Warning", "Please select a model first!")
-            return
-        
         item = self.tests_window.focus()
-        if not item:
-            return
-        obj_type = self.tests_window.item(item)["tags"][2]
-        if obj_type == "class":
-            return
-
+        if not item: return
         prim_key = self.tests_window.item(item)["tags"][1]
-        data = self.master.conn.execute(
-            "SELECT history FROM tests WHERE id=?",
-            (prim_key, )
-        ).fetchall()
+        data = self.master.db_manager.get_row_from_db(prim_key)
         if data:
             # If system message is present, avoid repeating it.
-            messages = json.loads(data[0][0])
+            messages: list[str, str] = json.loads(data[4])
             if self.master.chat_frame.chat_state:
                 messages = messages[1:]
-            for message in messages:
-                tag = message["role"].capitalize()
-                if message["role"] == "assistant": tag = "API"
-                self.master.chat_frame.display_message(
-                    message["content"],
-                    tag
-                )
-            self.master.chat_frame.update_state(json.loads(data[0][0]))
-     
+            for msg in messages:
+                tag = msg["role"].capitalize()
+                if msg["role"] == "assistant": tag = "API"
+                self.master.chat_frame.display_message(msg["content"], tag)
+            self.master.chat_frame.update_state(messages)
         else:
             messagebox.showerror("Error", "No test history found in the db")
     
-    def fetch_data(
-        self,
-        obj_name: str,
-        obj_type: str,
-        class_name: Union[str, None]=None
-    ) -> list[tuple]:
-        """
-        Fetches data from database for tests and coverage
-        
-        Args:
-            obj_name: name of the object. 
-            obj_type: One of ['function', 'class', 'class method'].
-            class_name: if obj_type is class method.
-        
-        Returns:
-            list of tuples with data from database.
-        """
-        
-        if obj_type == "class method":
-            query = """
-                SELECT * FROM tests
-                    WHERE obj=? AND class=?
-                    ORDER BY id DESC
-            """
-            data = self.master.conn.execute(
-                query,
-                (obj_name, class_name)
-            ).fetchall()
-            return data
-        elif obj_type == "function":
-            query = "SELECT * FROM tests WHERE obj=? ORDER BY id DESC"
-        elif obj_type == "class":
-            query = "SELECT * FROM tests WHERE class=? ORDER BY id DESC"
-        else:
-            raise ValueError("Unknown object type")
-        data = self.master.conn.execute(query, (obj_name, )).fetchall()
-        return data
     
-    def get_cov(
-        self,
-        obj_name: str,
-        obj_type: str,
-        class_name: Union[str, None]=None
-    ) -> tuple[set, set]:
+    def get_test_coverage(self, id: int) -> int:
         """
-        Returns sets of executed, missing lines for the object,
-        accumulated over all avaliable tests. searches the database.
-
-        Args:
-            obj_name: name of the object.
-            obj_type: One of ["function", "class", "class method"].
-            class_name: if obj_type is class method.
-
-        Returns:
-            tuple of sets of executed and missing lines.
-        """
+        computes coverage of a single test
         
-        resp = self.fetch_data(obj_name, obj_type, class_name)
-        if resp:
-            st, end, _ = self._find_lines(obj_name, obj_type, class_name)
-            data = [json.loads(it[-1]) for it in resp]
-            exec_lines = [method["executed_lines"] for method in data]
-            miss_lines = [method["missing_lines"] for method in data]
-            
-            exec_lines_flt = {
-                it
-                for subl in exec_lines
-                for it in subl
-                if st <= it <= end
-            }
-            miss_lines_flt = {
-                it
-                for subl in miss_lines
-                for it in subl
-                if st <= it <= end
-            }
-            return exec_lines_flt, miss_lines_flt.difference(exec_lines_flt)
+        Args:
+            id: id of the test in the database.
+        
+        Returns:
+            int between 0 and 100.
+        """
+        data = [self.master.db_manager.get_row_from_db(id)]
+        if data:
+            if data[0][2]:
+                return self.compute_coverage(data, "class method")
+            else:
+                return self.compute_coverage(data, "function")
         else:
-            return set(), set()
+            return 0
+        
+    def collect_exec_miss_lines(
+        self,
+        data: list[tuple],
+        obj_type: str
+    ) -> tuple[set, set]:
+        """Get executed and missing lines from a list of tests"""
+        # Get line numbers
+        if obj_type == "class":
+            class_name = data[0][2]
+            st, end, _ = utils.find_lines(class_name, obj_type)
+        else:
+            class_name, obj_name = data[0][2:4]
+            st, end, _ = utils.find_lines(obj_name, obj_type, class_name)
 
+        metadata = [json.loads(row[-1]) for row in data]
+        # Collect Executed and missing lines in a set
+        exec_lines = [method["executed_lines"] for method in metadata]
+        miss_lines = [method["missing_lines"] for method in metadata]
+        execs = {it for subl in exec_lines for it in subl if st <= it <= end}
+        miss = {it for subl in miss_lines for it in subl if st <= it <= end}
+        return execs, miss.difference(execs)
+    
+    def compute_coverage(self, data: list[tuple], obj_type: str) -> int:
+        """
+        Computes accumulated coverage for a list of tests of the same object.
+        
+        Args:
+            data: list of tuples with data from database.
+            type: One of ['function', 'class', 'class method'].
+        
+        Returns:
+            int between 0 and 100.
+        """
+        if not data:
+            return 0
+        execs, miss = self.collect_exec_miss_lines(data, obj_type)
+        return int(len(execs) / (len(execs) + len(miss)) * 100)
+
+        
     def gen_tests(self, event=None) -> None:
         """Generates tests for selected object"""
         item = self.workst_tree.focus()
@@ -1204,42 +988,40 @@ class UtilsFrame(ttk.Frame):
             raise
         self.master.chat_frame.send_message(initial_prompt, tag="User")
 
-    def open_selected_item(self) -> None:
-        """Opens selected item in default editor"""
-        selected_item = self.file_tree.focus()
-        if selected_item:
-            item_path = self.file_tree.item(selected_item)["tags"][0]
-            file = os.path.join(self.master.repo_dir, item_path)
-            if os.path.isfile(file):
-                self.file_tree.open_file(file)
+    def select_for_testing(self, item: Union[str, None]=None) -> None:
+        """
+        Selects module for testing and prepares adapter.
 
-    def select_for_testing(self) -> None:
+        Args:
+            item: item to select.
         """
-        Selects module for testing, prepares adapter and populates
-        workstation tree with functions and class methods.
-        """
+        if item is None:
+            return
+        self.module = item
         self.workst_tree.delete(*self.workst_tree.get_children())
-        selected_item = self.file_tree.focus()
-        if not selected_item:
-            if self.current_mod:
-                selected_item = self.current_mod
-            else: return
-        file_path: str = self.file_tree.item(selected_item)["tags"][0]
-        if not file_path.endswith(self.master.suffix):
+        module_path: str = self.file_tree.item(item)["tags"][0]
+        if not module_path.endswith(self.master.suffix):
             messagebox.showerror(
                 "Error",
                 f"Please select a {self.master.suffix} file."
             )
             return
-        
-        _ = utils.set_adapter(self.master.language, module_dir=file_path)
-        container_check = config.ADAPTER.check_reqs_in_container(
+        # Set Adapter
+        _ = utils.set_adapter(self.master.language, module_dir=module_path)
+        # Check if requirements are met in container
+        container_problem = config.ADAPTER.check_reqs_in_container(
             self.master.cont_manager.container
         )
-        if container_check:
-            messagebox.showerror("Error", container_check)
+        if container_problem:
+            messagebox.showerror("Error", container_problem)
             return
-        
+        _ = self.populate_ws_tree()
+
+    def populate_ws_tree(self) -> None:
+        """Populates workstation tree add computes coverages"""
+        # Populate Workstation Tree
+        if self.module is None: return
+        self.workst_tree.delete(*self.workst_tree.get_children())
         func_names = config.ADAPTER.retrieve_func_defs()
         class_names = config.ADAPTER.retrieve_class_defs()
         if func_names + class_names == []:
@@ -1250,134 +1032,72 @@ class UtilsFrame(ttk.Frame):
             return
         
         for func_name in func_names:
-            ex, miss = self.get_cov(func_name, "function")
-            if len(ex) == 0:
-                cov = "0%"
-            else:
-                cov = f"{int((len(ex)/(len(ex)+len(miss)))*100)}%"
-    
+            data = self.master.db_manager.get_function_tests(func_name)
+            cov = self.compute_coverage(data, "function")
             self.workst_tree.insert(
                 parent="",
                 index="end",
                 text=func_name,
                 values=("function", cov)
             )
-
         for cls in class_names:
-            ex_c, miss_c = self.get_cov(cls, "class")
-            if len(ex_c) == 0:
-                cls_cov = "0%"
-            else:
-                cls_cov= f"{int((len(ex_c)/(len(ex_c)+len(miss_c)))*100)}%"
-                
+            data_cls = self.master.db_manager.get_class_tests(cls)
+            cov_cls = self.compute_coverage(data_cls, "class")
             item_id = self.workst_tree.insert(
                 parent="",
                 index="end",
                 text=cls,
-                values=("class", cls_cov)
+                values=("class", cov_cls)
             )
             methods = config.ADAPTER.retrieve_class_methods(cls)
-            for method in methods:
-                ex_m, miss_m = self.get_cov(method, "class method", cls)
-                if len(ex_m) == 0:
-                    cov = "0%"
-                else:
-                    cov = f"{int((len(ex_m)/(len(ex_m)+len(miss_m)))*100)}%"
+            for met in methods:
+                data_met = self.master.db_manager.get_method_tests(cls, met)
+                cov_met = self.compute_coverage(data_met, "class method")
                 self.workst_tree.insert(
                     item_id,
                     "end",
-                    text=method,
-                    values=("class method", cov)
+                    text=met,
+                    values=("class method", cov_met)
                 )
-            self.current_mod = selected_item
         
     def open_cov_report(self) -> None:
         """Opens coverage report for selected object in new window"""
         item = self.workst_tree.focus()
-        if not item: return
-        cov_report = CovWindow()
-        obj = self.workst_tree.item(item)["text"]
-        obj_typ = self.workst_tree.item(item)["values"][0]
-        if obj_typ == "class method":
-            cls = self.workst_tree.item(self.workst_tree.parent(item))["text"]
-        else:
-            cls = None
-        start, _, lines = self._find_lines(obj, obj_typ, cls)
-
-        # Numbering and coloring lines
-        lns_ex, lns_miss = self.get_cov(obj, obj_typ, cls)
-
-        for i, line in enumerate(lines, start=start):
-            ln_n = "{:3d} ".format(i) + line
-            if i in lns_ex:
-                cov_report.text_frame.insert("end", ln_n + "\n", "executed")
-            elif i in lns_miss:
-                cov_report.text_frame.insert("end", ln_n + "\n", "missing")
-            else:
-                cov_report.text_frame.insert("end", ln_n + "\n", "irrelevant")
-        cov_report.text_frame.configure(state=tk.DISABLED)
-
-    def _find_lines(
-        self,
-        obj: str,
-        obj_type: str,
-        cls: Union[str, None]=None
-    ) -> tuple[int, int, list[str]]:
-        """
-        Finds start, end lines of obj definition in module source code.
-
-        Args:
-            obj: name of the object.
-            obj_type: type of the object.
-                One of ["function", "class", "class method"].
-            cls: class name if obj_type is class method.
-
-        Returns:
-            tuple of position where source_code starts, 
-                position where it ends and source code line by line
-                in a list.
-        """
-
-        module_source: str = config.ADAPTER.retrieve_module_source()
-        obj_source = self._retrieve_source(obj, obj_type, cls)
-
-        obj_src_strp = "\n".join(
-            [line.strip() for line in obj_source.split("\n")]
-        )
-        mod_src_strp = "\n".join(
-            [line.strip() for line in module_source.split("\n")]
-        )
-        target_lines = obj_src_strp.split('\n')
-        lines = mod_src_strp.split('\n')
-        for index, _ in enumerate(lines):
-            if all(line
-                   in lines[index + i] 
-                   for i, line in enumerate(target_lines)
-                ):
-                start_line = index + 1
-                break
-        end_line = start_line + len(target_lines) - 1
-        return start_line, end_line, obj_source.split("\n")
-    
-    def _retrieve_source(
-        self,
-        obj: str,
-        obj_type: str,
-        cls: Union[str, None]=None
-    ) -> str:
-        """Helper function to retrieve source code for the object"""
+        obj_name = self.workst_tree.item(item)["text"]
+        obj_type = self.workst_tree.item(item)["values"][0]
+        
+        if obj_type == "class":
+            data = self.master.db_manager.get_class_tests(obj_name)
+            class_name = None
         if obj_type == "function":
-            source_code = config.ADAPTER.retrieve_func_source(obj)
-        elif obj_type == "class":
-            source_code = config.ADAPTER.retrieve_class_source(obj)
-        elif obj_type == "class method":
-            source_code = config.ADAPTER.retrieve_classmethod_source(
-                class_name=cls,
-                method_name=obj
+            data = self.master.db_manager.get_function_tests(obj_name)
+            class_name = None
+        if obj_type == "class method":
+            class_name = self.workst_tree.item(
+                self.workst_tree.parent(item)
+            )["text"]
+            data = self.master.db_manager.get_method_tests(
+                class_name,
+                obj_name
             )
+
+        __ = self.display_coverage_report(obj_name, obj_type, data, class_name)
+
+    def display_coverage_report(
+        self,
+        obj: str,
+        obj_type: str,
+        data: list[tuple],
+        class_name: Union[str, None]=None
+    ) -> None:
+        """Displays coverage report in new window"""
+        cov_report = CovWindow()
+        start, _, lines = utils.find_lines(obj, obj_type, class_name)
+        if data:
+            lns_ex, lns_miss = self.collect_exec_miss_lines(data, obj_type)
         else:
-            messagebox.showinfo("Info", "No source code available.")
-        return source_code
+            lns_ex, lns_miss = set(), set()
+        cov_report.populate_text(lines, start, lns_ex, lns_miss)
 
     def show_tests(self, event=None) -> None:
         """Populates tests tree with tests for selected object"""
@@ -1387,10 +1107,12 @@ class UtilsFrame(ttk.Frame):
         obj = self.workst_tree.item(item)["text"]
         obj_typ = self.workst_tree.item(item)["values"][0]
         if obj_typ == "class method":
-            cls = self.workst_tree.item(self.workst_tree.parent(item))["text"]
+            class_name = self.workst_tree.item(
+                self.workst_tree.parent(item)
+            )["text"]
         else:
-            cls = None
-        self.tests_window.populate_tree(obj, obj_typ, cls)
+            class_name = None
+        self.tests_window.populate_tree(obj, obj_typ, class_name)
         
 class TestsTree(ttk.Treeview):
     """
@@ -1407,6 +1129,9 @@ class TestsTree(ttk.Treeview):
     """
     def __init__(self, master: UtilsFrame, *args, **kwargs):
         self.master: UtilsFrame
+        self.obj: Union[str, None] = None
+        self.obj_type: str
+        self.class_name: Union[str, None]
         col_names = ("Name", "Total", "Failed", "Coverage")
         super().__init__(master, columns=col_names, *args, **kwargs)
         
@@ -1432,6 +1157,10 @@ class TestsTree(ttk.Treeview):
             label="See Failures",
             command=lambda event=None: self.see_failures()
         )
+        self.menu.add_command(
+            label="Rerun Test",
+            command=lambda event=None: self.rerun_test()
+        )
         self.menu.add_separator()
         self.menu.add_command(
             label="Save Test",
@@ -1454,40 +1183,44 @@ class TestsTree(ttk.Treeview):
             self.selection_set(item_iden)
             self.menu.post(event.x_root, event.y_root)
 
-    def populate_tree(self, obj: str, obj_type: str, cls: str) -> None:
+    def refresh(self):
+        """Refreshes tests tree"""
+        if self.obj is None:
+            return
+        self.populate_tree(self.obj, self.obj_type, self.class_name)
+
+    def populate_tree(self, obj: str, obj_type: str, class_name: str) -> None:
         """Populates tests tree with data from database"""
-        data = self.master.fetch_data(obj, obj_type, cls)
-        for i, (prim_id, _, cl_n, obj, _, test, cov_rp) in enumerate(data):
-            if cl_n is None:
-                obj_t = "function"
-                lns_ex, lns_miss = self.master.get_cov(obj, obj_t)
-            else:
-                obj_t = "class method"
-                lns_ex, lns_miss = self.master.get_cov(
-                    obj,
-                    obj_t,
-                    cl_n
-                )
-            if len(lns_ex) == 0:
-                cov = "0%"
-            else:
-                cov = f"{int((len(lns_ex)/(len(lns_ex)+len(lns_miss)))*100)}%"
-        
-            cov_report = json.loads(cov_rp)
+        self.obj, self.obj_type, self.class_name = obj, obj_type, class_name
+        self.delete(*self.get_children())
+        if obj_type == "class method":
+            data = self.master.master.db_manager.get_method_tests(
+                class_name,
+                obj
+            )
+        elif obj_type == "class":
+            data = self.master.master.db_manager.get_class_tests(obj)
+        elif obj_type == "function":
+            data = self.master.master.db_manager.get_function_tests(obj)
+    
+        for i, (prim_id, _, cl_n, obj, _, test, metadata) in enumerate(data):
+            metadata_dict = json.loads(metadata)
+            obj_type = "class method" if cl_n else "function"
+            cov = self.master.get_test_coverage(prim_id)
             self.insert(
                 parent="",
                 index="end",
                 text=i+1,
                 values=(
                     obj,
-                    cov_report["tests_ran_n"],
-                    len(cov_report["failures"]),
+                    metadata_dict["tests_ran_n"],
+                    len(metadata_dict["failures"]),
                     cov
                 ),
-                tags=(test, prim_id, obj_t, cov_rp, cl_n)
+                tags=(test, prim_id, obj_type, metadata, cl_n)
             )
 
-    def save_test(self):
+    def save_test(self) -> None:
         """Saves selected test to a file"""
         test = self.item(self.focus())["tags"][0]
         file = filedialog.asksaveasfile(
@@ -1499,38 +1232,77 @@ class TestsTree(ttk.Treeview):
             file.write(test)
             file.close()
     
+    def rerun_test(self) -> None:
+        """Reruns selected test"""
+        item = self.focus()
+        if not item: return
+        test = self.item(item)["tags"][0]
+        primary_id = self.item(item)["tags"][1]
+        try:
+            result = self.master.master.cont_manager.run_tests_in_container(
+                test
+            )
+        except Exception as e:
+            self.master.master.logger.error(
+                f"Error occured while running tests: {e}"
+            )
+            return
+        if result["compile_error"]:
+            messagebox.showerror(
+                "Error",
+                "Error occured while compiling tests. "
+                "Please check the log for more details."
+            )
+            self.master.master.logger.error(
+                f"Compiling Error: {result['compile_error']}"
+            )
+            return
+        elif result["errors"]:
+            messagebox.showerror(
+                "Error",
+                "Error occured while running tests. "
+                "Please check the log for more details."
+            )
+            self.master.master.logger.error(
+                f"Running Error: {result['errors']}"
+            )
+            return
+        else:
+            try:
+                self.master.master.db_manager.update_test(
+                    primary_id,
+                    test,
+                    json.dumps(result)
+                )
+                self.master.master.logger.info("Tests successfully re-run.")
+            except Exception as e:
+                messagebox.showerror(
+                    "Error",
+                    "Error occured while updating database. "
+                    "Please check the log for more details."
+                )
+                self.master.master.logger.error(
+                    f"Database Error: {e}"
+                )
+                return
+        self.master.master.refresh()
+    
     def delete_test(self):
         """Deletes selected test from the database"""
         primary_id = self.item(self.focus())["tags"][1]
-        self.master.master.conn.execute(
-            "DELETE FROM tests WHERE id=?",
-            (primary_id, )
-        )
-        self.master.master.conn.commit()
+        self.master.master.db_manager.delete_row_from_db(primary_id)
         self.delete(self.focus())
     
     def open_cov_report(self):
         """Opens coverage report for selected test"""
         item = self.focus()
         if not item: return
-        cov_window = CovWindow()
-        cov_report = json.loads(self.item(item)["tags"][3])
-        exec_lines = cov_report["executed_lines"]
-        miss_lines = cov_report["missing_lines"]
-        start, _, lines = self.master._find_lines(
-            self.item(item)["values"][0],
-            self.item(item)["tags"][2],
-            self.item(item)["tags"][4]
-        )
-        for i, line in enumerate(lines, start=start):
-            ln_n = "{:3d} ".format(i) + line
-            if i in exec_lines:
-                cov_window.text_frame.insert("end", ln_n + "\n", "executed")
-            elif i in miss_lines:
-                cov_window.text_frame.insert("end", ln_n + "\n", "missing")
-            else:
-                cov_window.text_frame.insert("end", ln_n + "\n", "irrelevant")
-        cov_window.text_frame.configure(state=tk.DISABLED)
+        obj = self.item(item)["values"][0]
+        obj_type = self.item(item)["tags"][2]
+        class_name = self.item(item)["tags"][4]
+        id = self.item(item)["tags"][1]
+        data = [self.master.master.db_manager.get_row_from_db(id)]
+        self.master.display_coverage_report(obj, obj_type, data, class_name)
     
     def see_failures(self):
         """Displays failures in a new window"""
@@ -1555,35 +1327,33 @@ class TestsTree(ttk.Treeview):
         if item:
             obj = self.item(item)["values"][0]
             test = self.item(item)["tags"][0]
-            test_id = self.item(self.focus())["tags"][1]
-            TestWindow(
-                self.master,
-                obj,
-                test_id,
-                test,
-                self.master.master.conn
-            )
-    
+            test_id = self.item(item)["tags"][1]
+            TestWindow(self.master, obj, test_id, test)
+
     def clear_tree(self, event=None) -> None:
         """Clears tests tree"""
         self.delete(*self.get_children())
 
-
 class WorkStationTree(ttk.Treeview):
     """WorkstationTree separed from UtilsFrame for clarity"""
-    def __init__(self, master: UtilsFrame, *args, **kwargs):
-        self.master: UtilsFrame
-        super().__init__(master, columns=("Type", "Cov"), *args, **kwargs)
+    def __init__(self, master):
+        super().__init__(master, columns=("Type", "Cov"), height=5)
         self.heading("#0", text="Definition", anchor="w")
         self.heading("Type", text="Type", anchor="w")
         self.heading("Cov", text="Cov", anchor="w")
         self.column("Type", width=80)
         self.column("Cov", width=30)
-    
-    def refresh(self) -> None:
-        """Refreshes tree"""
-        self.master.select_for_testing()
-        self.master.tests_window.clear_tree()
+        # Add Right-click menu
+        self.menu_wst = tk.Menu(self, tearoff=0)
+        self.bind("<Button-2>", lambda event: self.post_wst(event))
+
+    def post_wst(self, event: tk.Event) -> None:
+        """Posts right-click menu for workstation tree"""
+        item_iden = self.identify_row(event.y)
+        if item_iden:
+            self.focus(item_iden)
+            self.selection_set(item_iden)
+            self.menu_wst.post(event.x_root, event.y_root)
 
 class TestWindow(tk.Toplevel):
     """
@@ -1592,17 +1362,8 @@ class TestWindow(tk.Toplevel):
     Methods:
         save_changes: saves changes to tests to the database.
     """
-    def __init__(
-        self,
-        master: UtilsFrame,
-        obj: str,
-        test_id: str,
-        test: str,
-        conn:sqlite3.Connection,
-        *args,
-        **kwargs
-    ) -> None:
-        super().__init__(master, *args, **kwargs)
+    def __init__(self, master: UtilsFrame, obj: str, test_id: str, test: str):
+        super().__init__(master)
         self.master: UtilsFrame
         self.title(obj)
         self.geometry("800x600")
@@ -1614,29 +1375,14 @@ class TestWindow(tk.Toplevel):
         self.save_test = ttk.Button(
             self,
             text="Save Changes",
-            command=lambda event=None:self.save_changes(test_id, conn)
+            command=lambda event=None:self.save_changes(test_id)
         )
         self.save_test.pack(side="left", padx=5, pady=5)
 
-    def save_changes(self, test_id: int, conn: sqlite3.Connection) -> None:
+    def save_changes(self, test_id: int) -> None:
         """Saves changes to the database"""
         modified_test = self.text_frame.get("1.0", tk.END)
-        conn.execute(
-            "UPDATE tests SET test=? WHERE id=?",
-            (modified_test, test_id)
-        )
-        # Modify also chat history
-        chat_history = conn.execute(
-            "SELECT history FROM tests WHERE id=?",
-            (test_id, )
-        ).fetchone()[0]
-        chat_history = json.loads(chat_history)
-        chat_history[-1]["content"] = modified_test
-        conn.execute(
-            "UPDATE tests SET history=? WHERE id=?",
-            (json.dumps(chat_history), test_id)
-        )
-        conn.commit()
+        self.master.master.db_manager.edit_test_in_db(test_id, modified_test)
         self.destroy()
         self.master.show_tests()
 
@@ -1652,7 +1398,33 @@ class CovWindow(tk.Toplevel):
         self.text_frame.tag_configure("missing", foreground="red")
         self.text_frame.tag_configure("irrelevant", foreground="grey")
         self.text_frame.pack(fill="both", expand=True)
+    
+    def populate_text(
+        self,
+        lines: list[str],
+        start: int,
+        executed_lines: list[int],
+        missing_lines: list[int]
+    ) -> None:
+        """
+        Populates text frame with lines and highlights accordingly
         
+        Args:
+            lines: list of lines to display.
+            start: starting line number.
+            executed_lines: list of executed lines.
+            missing_lines: list of missing lines.
+        """
+        for i, line in enumerate(lines, start=start):
+            ln_n = "{:3d} ".format(i) + line
+            if i in executed_lines:
+                self.text_frame.insert("end", ln_n + "\n", "executed")
+            elif i in missing_lines:
+                self.text_frame.insert("end", ln_n + "\n", "missing")
+            else:
+                self.text_frame.insert("end", ln_n + "\n", "irrelevant")
+        self.text_frame.configure(state=tk.DISABLED)
+
 class ConfigWindow(tk.Toplevel):
     """
     Configuration Window for setting pipeline parameters
@@ -1712,30 +1484,46 @@ class FileTree(ttk.Treeview):
     FileTree and its methods
     
     Methods:
-        refresh: refreshes tree.
         insert_directory: resursivly inserts files into tree.
+        open_selected_item: opens selected file in default editor.
+        refresh: refreshes tree.
         is_ignored: checks if file is ignored by .gitignore.
-        open_file: opens file in default editor.
     """
-    def __init__(
-        self,
-        master: UtilsFrame,
-        repo_dir: str,
-        suffix: str,
-        *args,
-        **kwargs
-    ) -> None:
-        self.master: UtilsFrame
-        super().__init__(master, *args, **kwargs)
+    def __init__(self, master, repo_dir: str, suffix: str) -> None:
+        super().__init__(master, show="tree", columns=["Value"], height=4)
         self.repo_dir = repo_dir
         self.suffix = suffix
         self.column("#0", width=200)
+        # Right-Click Menu
+        self.menu = tk.Menu(self, tearoff=0)
+        self.menu.add_command(
+            label="Open File",
+            command=lambda event=None: self.open_selected_item()
+        )
+        self.bind("<Button-2>", lambda event: self.post_ft(event))
         self.insert_directory(parent="", current_path=self.repo_dir)
+
+    def open_selected_item(self) -> None:
+        """Opens selected file in default editor"""
+        selected_item = self.focus()
+        if selected_item:
+            item_path = self.item(selected_item)["tags"][0]
+            file = os.path.join(self.repo_dir, item_path)
+            if os.path.isfile(file):
+                self.open_file(file)
 
     def refresh(self) -> None:
         """Refreshes tree"""
         self.delete(*self.get_children())
         self.insert_directory(parent="", current_path=self.repo_dir)
+
+    def post_ft(self, event: tk.Event) -> None:
+        """Posts right-click menu for file tree"""
+        item_iden = self.identify_row(event.y)
+        if item_iden:
+            self.focus(item_iden)
+            self.selection_set(item_iden)
+            self.menu.post(event.x_root, event.y_root)
 
     def insert_directory(self, parent: str, current_path: str) -> None:
         """Recursivly inserts files into tree"""
@@ -1798,11 +1586,12 @@ class FileTree(ttk.Treeview):
             elif sys.platform.startswith('linux'):
                 subprocess.call(('xdg-open', file_path))
             else:
-                print("Unsupported platform: ", sys.platform)
+                messagebox.showerror(
+                    "Error",
+                    "Unsupported platform: " + sys.platform
+                )
         except Exception as e:
-            messagebox.showerror("Error", "Error occured while opening file")
-            self.master.master.logger.error(f"{e}")
-            raise
+            messagebox.showerror("Error", f"Opening file failed: {e}")
 
 class CustomText(tk.Text):
     """Custom tk.Text: allows selecting and copying text."""
@@ -1820,8 +1609,9 @@ class CustomText(tk.Text):
 
 class Statistics(tk.Toplevel):
     """Class for Visualizing token usage statistics"""
-    def __init__(self, x_geom, y_geom, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, master, x_geom, y_geom, *args, **kwargs):
+        super().__init__(master, *args, **kwargs)
+        self.master: UtilsFrame
         self.title("Statistics")
         self.geometry(f"+{x_geom}+{y_geom}")
         self.resizable(False, False)
@@ -1837,10 +1627,10 @@ class Statistics(tk.Toplevel):
         self.table.heading("Input Tokens", text="Input Tokens", anchor="w")
         self.table.heading("Output Tokens", text="Output Tokens", anchor="w")
     
-    def populate_table(self, conn: sqlite3.Connection) -> None:
+    def populate_table(self) -> None:
         """Populates table with token usage statistics."""
         self.table.delete(*self.table.get_children())
-        data = conn.execute("SELECT * FROM token_usage").fetchall()
+        data = self.master.master.db_manager.get_usage_data()
         for row in data:
             self.table.insert("", "end", text="", values=row)
         self.table.pack(fill="both", expand=True)
@@ -1879,7 +1669,6 @@ class LogConsole(scrolledtext.ScrolledText):
         self.delete("1.0", tk.END)
         self.config(state=tk.DISABLED)
   
-
 class CustomHandler(logging.Handler):
     """Custom logging handler for redirecting logs to GUI"""
     def __init__(self, text: LogConsole, *args, **kwargs) -> None:
@@ -1899,7 +1688,6 @@ class CustomHandler(logging.Handler):
         self.text.see(tk.END)
         self.text.update()
         self.text.config(state=tk.DISABLED)
-
 
 def main() -> None:
     """Entry point for the app"""
