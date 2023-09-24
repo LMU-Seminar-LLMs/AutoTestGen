@@ -112,7 +112,7 @@ def generate_tests(
             continue
         
         elif test_report["errors"]:
-            logger.info("Somne of the tests failed to run")
+            logger.info("Some of the tests failed to run")
         # Errors occured while running tests: reprompt
             new_prompt = TEST_ERROR_REPROMPT.format(
                 id_error_str=list_errors(test_report["errors"]),

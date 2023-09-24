@@ -10,6 +10,7 @@ class DBManager:
             db_path (str): path to the database file.
         """
         self.conn = self.connect_to_db(db_path)
+        self.conn.row_factory = sqlite3.Row
 
     def connect_to_db(self, db_path: str) -> sqlite3.Connection:
         """
@@ -99,14 +100,14 @@ class DBManager:
             cursor.close()
         self.conn.commit()
 
-    def get_row_from_db(self, id: int) -> tuple:
+    def get_row_from_db(self, id: int) -> sqlite3.Row:
         """Returns data from the database.
 
         Args:
             id (int): id of the test.
         
         Returns:
-            tuple: Single row from the db representing single test.
+            sqlite3.Row: Single row from the database.
         """
         cursor = self.conn.cursor()
         try:
@@ -116,14 +117,14 @@ class DBManager:
             cursor.close()
         return data
         
-    def get_class_tests(self, class_name: str) -> list:
+    def get_class_tests(self, class_name: str) -> list[sqlite3.Row]:
         """Returns all tests for the class from the database.
 
         Args:
             class_name (str): name of the class.
         
         Returns:
-            list: data from the database.
+            list[sqlite3.Row]: list of rows from the database.
         """
         cursor = self.conn.cursor()
         try:
@@ -133,7 +134,7 @@ class DBManager:
             cursor.close()
         return data
     
-    def get_method_tests(self, class_name: str, method: str) -> list:
+    def get_method_tests(self, class_name: str, method: str) -> list[sqlite3.Row]:
         """Returns all tests for the method from the database.
 
         Args:
@@ -141,7 +142,7 @@ class DBManager:
             method (str): name of the method.
         
         Returns:
-            list: data from the database.
+            list[sqlite3.Row]: list of rows from the database.
         """
         cursor = self.conn.cursor()
         try:
@@ -154,14 +155,14 @@ class DBManager:
             cursor.close()
         return data
     
-    def get_function_tests(self, function_name: str) -> list:
+    def get_function_tests(self, function_name: str) -> list[sqlite3.Row]:
         """Returns all tests for the function from the database.
 
         Args:
             function_name (str): name of the function.
         
         Returns:
-            list: data from the database.
+            list[sqlite3.Row]: list of rows from the database.
         """
         cursor = self.conn.cursor()
         try:
@@ -204,7 +205,7 @@ class DBManager:
         # Get old test
         data = self.get_row_from_db(id)
         # Edit history
-        history: list[dict] = json.loads(data[4])
+        history: list[dict] = json.loads(data["history"])
         history[-1].update({"content": test})
         try:
             cursor.execute(
@@ -215,11 +216,11 @@ class DBManager:
             cursor.close()
         self.conn.commit()
     
-    def get_usage_data(self) -> list[tuple]:
+    def get_usage_data(self) -> list[sqlite3.Row]:
         """Returns data from the token_usage table.
 
         Returns:
-            list[tuple]: data from the token_usage table.
+            list[sqlite3.Row]: complete token_usage table.
         """
         cursor = self.conn.cursor()
         try:

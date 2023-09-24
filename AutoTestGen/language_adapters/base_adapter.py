@@ -37,17 +37,17 @@ class BaseAdapter(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def retrieve_func_defs(self) -> list:
+    def retrieve_func_defs(self) -> list[str]:
         """Returns list of function names avaliable in Body."""
         pass
     
     @abc.abstractmethod
-    def retrieve_class_defs(self) -> list:
+    def retrieve_class_defs(self) -> list[str]:
         """Returns list of class names avaliable in Body."""
         pass
     
     @abc.abstractmethod
-    def retrieve_class_methods(self, class_name: str) -> list:
+    def retrieve_class_methods(self, class_name: str) -> list[str]:
         """Returns list of methods of a class given a class name."""
         pass
 

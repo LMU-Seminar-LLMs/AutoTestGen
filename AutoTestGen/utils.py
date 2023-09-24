@@ -59,28 +59,81 @@ def count_tokens(messages: list[dict[str, str]]) -> int:
     return sum(num_tokens)
 
 
+def compute_coverage(
+    object_name: str,
+    object_type: str,
+    test_metadata: list[dict],
+    class_name: Union[str, None]=None
+) -> int:
+    """
+    Computes accumulated coverage for a list of tests of the same object.
+    
+    Args:
+        object_name: Name of the object.
+        object_type: One of ['function', 'class', 'class method'].
+        test_metadata: list of dicts containing test metadata.
+            every dict contains keys: "executed_lines", "missing_lines".
+        class_name: Name of the class if object_type is class method.
+    
+    Returns:
+        int between 0 and 100.
+    """
+    if not test_metadata:
+        return 0
+    executed, missing = collect_executed_missing_lines(
+        object_name, object_type, test_metadata, class_name
+    )
+    return int(len(executed) / (len(executed) + len(missing)) * 100)
+
+
+def collect_executed_missing_lines(
+    object_name: str,
+    object_type: str,
+    test_metadata: list[dict],
+    class_name: Union[str, None]=None
+) -> tuple[set[int], set[int]]:
+    """
+    Collects executed, missing lines over all available tests in a set.
+    Helper function for compute_coverage.
+    """
+    if not test_metadata:
+        return set(), set()
+    # Find start, end lines of the object definition
+    st, end, _ = find_lines(object_name, object_type, class_name)
+    # Collect executed, missing lines over all available tests in a set
+    exec_lines = [test["executed_lines"] for test in test_metadata]
+    miss_lines = [test["missing_lines"] for test in test_metadata]
+    execs = {it for subl in exec_lines for it in subl if st <= it <= end}
+    miss = {it for subl in miss_lines for it in subl if st <= it <= end}
+    miss = miss.difference(execs)
+    return execs, miss
+
+
 def find_lines(
-    obj: str,
-    obj_type: str,
+    object_name: str,
+    object_type: str,
     class_name: Union[str, None]=None
 ) -> tuple[int, int, list[str]]:
     """
-    Finds start, end lines of obj definition in module source code.
+    Finds start, end lines of the object definition in module source code.
 
     Args:
-        obj: name of the object.
-        obj_type: One of ["function", "class", "class method"].
-        class_name: class name if obj_type is class method.
+        object_name: name of the object.
+        object_type: One of ["function", "class", "class method"].
+        class_name: class name if object_type is class method.
 
     Returns:
         tuple of position where source_code starts, ends and source
             code line by line in a list.
 
+    Raises:
+        ValueError: If the adapter is not set.
+        ValueError: If the object type is not supported.
     """
     if config.ADAPTER is None:
         raise ValueError("Adapter is not set.")
     module_source: str = config.ADAPTER.retrieve_module_source()
-    obj_source = _retrieve_source(obj, obj_type, class_name)
+    obj_source = _retrieve_source(object_name, object_type, class_name)
 
     target_lines = [line.strip() for line in obj_source.split("\n")]
     lines = [line.strip() for line in module_source.split("\n")]
@@ -91,26 +144,29 @@ def find_lines(
             lines[index: index + len(target_lines)] == target_lines
         ):
             start_line = index + 1
-            end_line = index + len(target_lines)
+            end_line = start_line + len(target_lines)
             break
     return start_line, end_line, obj_source.split("\n")
 
 def _retrieve_source(
-    obj: str,
-    obj_type: str,
+    object_name: str,
+    object_type: str,
     class_name: Union[str, None]=None
 ) -> str:
-    """Helper function for find_lines."""
-    if obj_type == "function":
-        return config.ADAPTER.retrieve_func_source(obj)
-    elif obj_type == "class":
-        return config.ADAPTER.retrieve_class_source(obj)
-    elif obj_type == "class method":
+    """
+    Retrieves source code of the object using the adapter instance.
+    Helper function for find_lines.
+    """
+    if object_type == "function":
+        return config.ADAPTER.retrieve_func_source(object_name)
+    elif object_type == "class":
+        return config.ADAPTER.retrieve_class_source(object_name)
+    elif object_type == "class method":
         return config.ADAPTER.retrieve_classmethod_source(
             class_name,
-            method_name=obj
+            method_name=object_name
         )
     else:
         raise ValueError(
-            "obj_type must be one of ['function', 'class', 'class method']"
+            "object_type must be one of ['function', 'class', 'class method']"
         )

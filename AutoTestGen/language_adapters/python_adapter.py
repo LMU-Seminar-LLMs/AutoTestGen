@@ -22,13 +22,13 @@ class PythonAdapter(BaseAdapter):
     def retrieve_module_source(self) -> str:
         return inspect.getsource(self.sourced_module)
 
-    def retrieve_func_defs(self) -> list:
+    def retrieve_func_defs(self) -> list[str]:
         return self.code_analyser.body_func_names
 
-    def retrieve_class_defs(self) -> list:
+    def retrieve_class_defs(self) -> list[str]:
         return self.code_analyser.body_class_names
     
-    def retrieve_class_methods(self, class_name: str) -> list:
+    def retrieve_class_methods(self, class_name: str) -> list[str]:
         class_node = self.code_analyser.body_class_nodes[
             self.code_analyser.body_class_names.index(class_name)
         ]
@@ -99,7 +99,7 @@ class PythonAdapter(BaseAdapter):
             **kwargs:
                 obj_name (str): Name of the obj (class, func) to test.
         """
-        obj_name= kwargs.get('obj_name')
+        obj_name = kwargs.get('obj_name')
         
         # Making sure that tested object is imported.
         test_lines = test.split("\n")
@@ -154,101 +154,81 @@ class PythonAdapter(BaseAdapter):
         return sourced_module
 
 
-    def prepare_prompt(self, obj_name: str, method_name: str=None):
-        objs = (
-            self.code_analyser.body_func_names
-            + self.code_analyser.body_class_names
+    def _prepare_prompt_method(
+        self,
+        object_name: str,
+        method_name: str
+    ) -> list[dict[str, str]]:
+        """
+        Helper function for preparing prompt for a method of a class.
+        
+        Args:
+            object_name (str): Name of the class.
+            method_name (str): Name of the method.
+        
+        Returns:
+            list[dict[str, str]]: List of messages.
+        """
+        object_description = (
+            "Method Definition of a class called " + object_name
+        )
+        object_type = "method"
+        class_node = self.code_analyser.retrieve_class_node(object_name)
+        method_node = self.code_analyser.retrieve_func_node(
+            object_name,
+            method_name
+        )
+        source_code = self.retrieve_classmethod_source(
+            object_name,
+            method_name
+        )
+        if (_has_init(object_name, self.sourced_module) and
+                method_name != "__init__"):
+            init = self.retrieve_classmethod_source(object_name, "__init__")
+        else:
+            init = None
+        
+        class_attributes = self.code_analyser.identify_body_variables(
+            class_node
+        )
+        class_attributes_str = "\n".join(class_attributes)
+        imports_str = "\n".join(self.code_analyser.import_statements)
+        constants_str = "\n".join([
+            f"{k}: {v}"
+            for k, v in self.code_analyser.imported_constants.items()
+        ])
+        variables_str = "\n".join(self.code_analyser.variables)
+        local_type_variables_str = "\n".join(
+            [f"{k}: {v}" for k, v in self.code_analyser.local_type_variables]
+        )
+        relevant_calls = self.code_analyser.get_local_calls(
+            method_node,
+            method=True,
+            class_name=object_name
+        )
+        local_defs_str = self.code_analyser.get_local_defs_str(relevant_calls)
+
+        info_sheet = generate_python_info_sheet(
+            object_type = object_type,
+            module_name=self.mod_name,
+            imports=imports_str,
+            constants=constants_str,
+            variables=variables_str,
+            local_type_variables=local_type_variables_str,
+            local_call_defs=local_defs_str,
+            class_name=object_name,
+            init=init,
+            class_attributes=class_attributes_str
         )
 
-        if obj_name not in objs:
-            raise ValueError(
-                obj_name + " not found in the module " + self.mod_name
-            )
-        
-        # Two cases: Function or class methods
-        if (
-            obj_name in self.code_analyser.body_func_names and 
-            method_name is None
-        ):
-            
-            obj_type = "function"
-            obj_desc = "Function Definition"
-            node = self.code_analyser.retrieve_func_node(obj_name)
-            source_code = self.retrieve_func_source(obj_name)
-            relevant_calls = self.code_analyser.get_local_calls(node)
-            local_call_defs = self.code_analyser.get_local_defs_str(
-                relevant_calls
-            )
-
-            info_sheet = generate_python_info_sheet(
-                obj_type = obj_type,
-                module_name=self.mod_name,
-                imports=self.code_analyser.imports_string,
-                constants=self.code_analyser.imported_constants_str,
-                variables=self.code_analyser.variables_string,
-                local_call_defs=local_call_defs
-            )
-        
-        elif (obj_name in self.code_analyser.body_class_names and
-               method_name is not None):
-            obj_type = "class"
-            obj_desc = "Method Definition of a class called " + obj_name
-            class_node = self.code_analyser.retrieve_class_node(obj_name)
-            method_node = self.code_analyser.retrieve_func_node(
-                obj_name,
-                method_name
-            )
-            source_code = self.retrieve_classmethod_source(
-                obj_name,
-                method_name
-            )
-            
-            has_init = self.code_analyser._has_init(
-                obj_name,
-                self.sourced_module
-            )
-
-            if has_init and method_name != "__init__":
-                init = self.retrieve_classmethod_source(obj_name, "__init__")
-            else:
-                init = ''
-
-            class_attributes = self.code_analyser.get_body_variables_str(
-                class_node
-            )
-            relevant_calls = self.code_analyser.get_local_calls(
-                method_node,
-                method=True,
-                class_name=obj_name
-            )
-
-            local_call_defs = self.code_analyser.get_local_defs_str(
-                relevant_calls
-            )
-
-            info_sheet = generate_python_info_sheet(
-                obj_type = obj_type,
-                module_name=self.mod_name,
-                imports=self.code_analyser.imports_string,
-                constants=self.code_analyser.imported_constants_str,
-                variables=self.code_analyser.variables_string,
-                local_call_defs=local_call_defs,
-                class_name=obj_name,
-                init=init,
-                class_attributes=class_attributes
-            )
-
-        
-        # Prepare system PROMPT
         system_prompt = INITIAL_SYSTEM_PROMPT.format(
             language=self.language,
             framework=self.framework,
-            obj_desc= obj_desc
+            obj_desc= object_description
         )
 
-        # Prepare initial user PROMPT
         user_prompt = INITIAL_USER_PROMPT.format(
-            obj_type= "Function "if obj_type == "function" else "Method",
+            object_type=object_type.capitalize(),
             source_code=source_code,
             info_sheet=info_sheet
         )
@@ -259,6 +239,94 @@ class PythonAdapter(BaseAdapter):
         ]
         return messages
 
+    def _prepare_prompt_function(
+        self,
+        object_name: str
+    ) -> list[dict[str, str]]:
+        """
+        Helper function for preparing prompt for a function.
+        
+        Args:
+            object_name (str): Name of the function.
+            
+        Returns:
+            list[dict[str, str]]: List of messages.
+        """
+        object_description = "Function Definition"
+        object_type = "function"
+        node = self.code_analyser.retrieve_func_node(object_name)
+        source_code = self.retrieve_func_source(object_name)
+        
+        system_prompt = INITIAL_SYSTEM_PROMPT.format(
+            language=self.language,
+            framework=self.framework,
+            obj_desc= object_description
+        )
+
+        imports_str = "\n".join(self.code_analyser.import_statements)
+        constants_str = "\n".join([
+            f"{k}: {v}"
+            for k, v in self.code_analyser.imported_constants.items()
+        ])
+        variables_str = "\n".join(self.code_analyser.variables)
+        local_type_variables_str = "\n".join(
+            [f"{k}: {v}" for k, v in self.code_analyser.local_type_variables]
+        )
+        relevant_calls = self.code_analyser.get_local_calls(node)
+        local_defs_str = self.code_analyser.get_local_defs_str(relevant_calls)
+
+        info_sheet = generate_python_info_sheet(
+            object_type = object_type,
+            module_name=self.mod_name,
+            imports=imports_str,
+            constants=constants_str,
+            variables=variables_str,
+            local_type_variables=local_type_variables_str,
+            local_call_defs=local_defs_str
+        )
+        
+        user_prompt = INITIAL_USER_PROMPT.format(
+            object_type=object_type.capitalize(),
+            source_code=source_code,
+            info_sheet=info_sheet
+        )
+
+        messages = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt}
+        ]
+        return messages
+
+    def prepare_prompt(
+        self,
+        object_name: str,
+        method_name: str=None
+    ) -> list[dict[str, str]]:
+        object_names = (
+            self.code_analyser.body_func_names
+            + self.code_analyser.body_class_names
+        )
+        if object_name not in object_names:
+            raise ValueError(
+                object_name + " not found in the module " + self.mod_name
+            )
+        
+        # Function case
+        if (
+            object_name in self.code_analyser.body_func_names and
+            method_name is None
+        ):
+            messages = self._prepare_prompt_function(object_name)
+        # Method case
+        elif (
+            object_name in self.code_analyser.body_class_names and
+            method_name is not None
+        ):
+            messages = self._prepare_prompt_method(object_name, method_name)
+        else:
+            raise ValueError("Invalid object name or method name.")
+        # Might add entire class case later.
+        return messages
 
 class AstVisitor(ast.NodeVisitor):
     """
@@ -266,7 +334,8 @@ class AstVisitor(ast.NodeVisitor):
     
     Attributes:
         sourced_module (ModuleType): Sourced module.
-        imports_string (str): String of all import statements combined.
+        import_statements list[str]: List of import statements
+            in the module.
         modules (dict[str, str]): Dictionary of imported modules.
             Keys: asnames of imported modules. [import module as name]
             Values: actual module names.
@@ -277,19 +346,19 @@ class AstVisitor(ast.NodeVisitor):
     """
     def __init__(self, sourced_module: ModuleType):
         self.sourced_module = sourced_module
-        self.imports_string : str = ''
+        self.import_statements: list[str] = []
         self.modules : dict[str, str] = dict()
-        self.func_names : set = set()
-        self.instances : dict = dict()
+        self.func_names : set[str] = set()
+        self.instances : dict[str, str] = dict()
 
     def visit_Import(self, node: ast.Import) -> None:
         """
         Handles both simple and alias imports. Statements are collected
-        in imports_string. Imported moule names are collected in
+        in import_statements. Imported moule names are collected in
         modules dict.
         Runs recursively through the tree starting from node.
         """
-        self.imports_string += (ast.unparse(node) + '\n')
+        self.import_statements.append(ast.unparse(node))
         for alias in node.names:
             if alias.asname:
                 # Alias import
@@ -302,13 +371,13 @@ class AstVisitor(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         """
         Handles import from statements. Statements are collected
-        in imports_string. Imported moule names are collected in
+        in import_statements. Imported moule names are collected in
         modules dict.
         Runs recursively through the tree starting from node.
         """
         module = node.module
         if module:
-            self.imports_string += (ast.unparse(node) + '\n')
+            self.import_statements.append(ast.unparse(node))
             for alias in node.names:
                 # From import with alias
                 if alias.asname:
@@ -365,16 +434,26 @@ class AstVisitor(ast.NodeVisitor):
                         self.instances[target.id] = func_name
                     else:
                         self.func_names.add(func_name)
-
             elif isinstance(target, ast.Tuple):
-                # Tuple assignment with multiple targets
-                for target_name, value in zip(target.dims, node.value.dims):
-                    if isinstance(value, ast.Call):
-                        func_name = self._get_function_name(value.func)
-                        if self._is_class(func_name, self.sourced_module):
-                            self.instances[target_name.id] = func_name
-                        else:
-                            self.func_names.add(func_name)
+                # Tuple assignment with multiple targets and single value
+                if isinstance(node.value, ast.Call):
+                    func_name = self._get_function_name(node.value.func)
+                    if self._is_class(func_name, self.sourced_module):
+                        for target in target.elts:
+                            if isinstance(target, ast.Name):
+                                self.instances[target.id] = func_name
+                    else:
+                        self.func_names.add(func_name)
+                elif isinstance(node.value, ast.Tuple):
+                    # Tuple assignment with multiple targets and values
+                    for tar_name, value in zip(target.elts, node.value.elts):
+                        if isinstance(value, ast.Call):
+                            func_name = self._get_function_name(value.func)
+                            if self._is_class(func_name, self.sourced_module):
+                                if isinstance(tar_name, ast.Name):
+                                    self.instances[tar_name.id] = func_name
+                            else:
+                                self.func_names.add(func_name)
     
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         """
@@ -386,7 +465,8 @@ class AstVisitor(ast.NodeVisitor):
             # simple annotated assignment
             func_name = self._get_function_name(node.value.func)
             if self._is_class(func_name, self.sourced_module):
-                self.instances[node.traget.id] = func_name
+                if isinstance(node.target, ast.Name):
+                    self.instances[node.target.id] = func_name
         if node.value is None:
             # Hint annotation without actual value assignment
             if isinstance(node.annotation, ast.Name):
@@ -429,6 +509,13 @@ class AstVisitor(ast.NodeVisitor):
             return self._get_function_name(node.func)
         elif isinstance(node, ast.Constant):
             return node.value
+    
+    def restore_visitor(self) -> None:
+        """Resets visitor attributes."""
+        self.import_statements = []
+        self.modules = dict()
+        self.func_names = set()
+        self.instances = dict()
 
 class CodeAnalyser:
     """Class for analysing the code of a module."""
@@ -458,10 +545,10 @@ class CodeAnalyser:
         ]
         self.body_func_names = [node.name for node in self.body_func_nodes]
 
-        # Instance of AstVisitor to go through syntax-tree
+        # Instance of AstVisitor to analyse syntax-tree
         self.ast_visitor = AstVisitor(self.sourced_module)
         
-        # Function and Class definitons of the body are already identified
+        # Function and Class defs of the body are already identified
         # Now we visit the rest of the body nodes using the visitor
         for node in self.syntax_tree.body:
             if not isinstance(
@@ -471,12 +558,12 @@ class CodeAnalyser:
                 self.ast_visitor.visit(node)
         
         # Collect results
-        # 1. Import statements in a single string + names of imported modules
-        self.imports_string = self.ast_visitor.imports_string
-        self.modules_all = [*self.ast_visitor.modules.keys()]
+        # 1. Import statements.
+        self.import_statements = self.ast_visitor.import_statements[:]
         
         # Local modules: modules that are part of the same package, repository
-        self.modules_local = self.get_local_modules(self.modules_all)
+        modules = self.ast_visitor.modules.copy()
+        self.modules_local = self.get_local_modules(modules)
         
         # 2. Imported constants in a single string.
         # primitives for identifying constants
@@ -484,13 +571,21 @@ class CodeAnalyser:
             str, int, float, complex, list, tuple, range, dict, set,
             frozenset, bool, bytes, bytearray, memoryview, type(None)
         )
-        self.imported_constants_str = self.get_imported_constants_str(
-            self.modules_all
+        self.imported_constants = self.identify_imported_constants(
+            module_asnames=[*modules.keys()]
         )
-        # 3. Body Level assignments without recursion.
-        self.variables_string = self.get_body_variables_str(self.syntax_tree)
+        
+        # 3. Identify Body Level assignments without recursion.
+        self.variables = self.identify_body_variables(self.syntax_tree)
+        
+        # 4. Identify local type variables.
+        self.local_type_variables = self.identify_local_type_variables(
+            node=self.syntax_tree,
+            body_definiton_names=self.body_func_names + self.body_class_names,
+            modules_local=self.modules_local
+        )
 
-        # 4. Identify body level created or from local module imported
+        # 5. Identify body level created or from local module imported
         # class instances.
         self.body_instances = {
             k:v
@@ -500,115 +595,11 @@ class CodeAnalyser:
                 v.split(".")[0] in self.modules_local
             )
         }
-        
-    def get_local_modules(self, modules_all: list) -> list:
-        """
-        Returns list of local modules:
-            modules that are part of the same package, repository
 
-        Args:
-            modules_all (list): List of asnames of imported modules.
-
-        Returns:
-            list: List of local module asnames.    
-        """
-        # Actual names of imported modules
-        imported_mods = [*self.ast_visitor.modules.values()]
-        dir_path = os.path.dirname(self.sourced_module.__file__)
-        # Local .py files and dirs
-        local_files = [
-            fn
-            for fn in os.listdir(dir_path)
-            if os.path.isdir(os.path.join(dir_path, fn)) or fn.endswith(".py")
-        ]
-        # Check if imported module is local
-        modules_local = []
-        for mod in imported_mods:
-            if mod.startswith(".") or mod.split(".")[0] in local_files:
-                for i, v in enumerate(imported_mods):
-                    if v == mod:
-                        # Collect module asnames
-                        modules_local.append(modules_all[i])
-        return modules_local
+    def retrieve_class_node(self, obj_name: str) -> ast.ClassDef:
+        """Returns class node given a class name"""
+        return self.body_class_nodes[self.body_class_names.index(obj_name)]
     
-    def get_imported_constants_str(self, modules_all: list) -> str:
-        """
-        Returns string of imported constants
-        
-        Args:
-            modules_all (list): List of asnames of imported modules.
-        
-        Returns:
-            str: containing all imported constants with their values.
-        """
-        imported_consts_str = ''
-        for module in modules_all:
-            traced_module = self._trace_module(module, self.sourced_module)
-            obj = getattr(traced_module, module.split(".")[-1])
-            if type(obj) in self.primitives:
-                imported_consts_str += (module + "=" + str(obj) + "\n")
-        return imported_consts_str
-    
-    def get_body_variables_str(
-        self,
-        node: Union[ast.Module, ast.ClassDef]
-    ) -> None:
-        """
-        Returns string of body level assignments and additionally
-        looks for declarations of variable types which are local and
-        unknown to the GPT model.
-        """
-        variables_string = ''
-        decleared_types = ''
-        rest_nodes = [
-            subn
-            for subn in node.body
-            if not isinstance(subn, (
-                ast.Import,
-                ast.ImportFrom,
-                ast.FunctionDef,
-                ast.ClassDef,
-                ast.AsyncFunctionDef
-            ))
-        ]
-        
-        body_defs = self.body_func_names + self.body_class_names
-        for rest_node in rest_nodes:
-            # Ignore docstrings
-            if isinstance(rest_node, ast.Expr):
-                if isinstance(rest_node.value, ast.Constant):
-                    if isinstance(rest_node.value.value, str):
-                        continue
-            variables_string += (ast.unparse(rest_node) + '\n')
-            # Body Level assignments
-            if isinstance(rest_node, ast.Assign):
-                if isinstance(rest_node.value, ast.Call):
-                    # Unobvious local type variable assignments.
-                    call_name = self.ast_visitor._get_function_name(
-                        rest_node.value.func
-                    )
-                    if (
-                        call_name in body_defs or
-                        call_name in self.modules_local
-                    ):
-                        for name in rest_node.targets:
-                            decleared_types += (
-                                name.id 
-                                + ": " 
-                                + type(getattr(self.sourced_module, name.id))
-                                + "\n"
-                            )
-        if decleared_types != '':
-            final_string = (
-                variables_string
-                + "Additionally variable types for body-decleared variables "
-                + "whose types are not obvious:\n"
-                + decleared_types
-            )
-        else:
-            final_string = variables_string
-        return final_string
-
     def retrieve_func_node(
         self,
         obj_name: str,
@@ -638,17 +629,150 @@ class CodeAnalyser:
             method_names = [method.name for method in method_nodes]
             node = method_nodes[method_names.index(method)]
         return node
+        
+    def get_local_modules(self, modules: dict[str, str]) -> list[str]:
+        """
+        Returns list of local modules:
+            modules that are part of the same package, repository.
 
-    def retrieve_class_node(self, obj_name: str) -> ast.ClassDef:
-        """Returns class node given a class name"""
-        return self.body_class_nodes[self.body_class_names.index(obj_name)]
+        Args:
+            modules (dict[str, str]): Dictionary of imported modules.
+                Keys: asnames of imported modules. [import module as name]
+                Values: actual module names.
+
+        Returns:
+            list: List of local module asnames.    
+        """
+        module_asnames = [*modules.keys()]
+        module_names = [*modules.values()]
+        dir_path: str = os.path.dirname(self.sourced_module.__file__)
+        # Local .py files and dirs
+        local_files = [
+            fn
+            for fn in os.listdir(dir_path)
+            if os.path.isdir(os.path.join(dir_path, fn)) or fn.endswith(".py")
+        ]
+        # Check if imported module is local
+        modules_local = []
+        for mod in module_names:
+            if mod.startswith(".") or mod.split(".")[0] in local_files:
+                for i, v in enumerate(module_names):
+                    if v == mod:
+                        # Collect module asnames
+                        modules_local.append(module_asnames[i])
+        return modules_local
+    
+    def identify_imported_constants(
+        self,
+        module_asnames: list[str]
+    ) -> dict[str, str]:
+        """
+        Identifies imported constants in a module.
+
+        Args:
+            module_asnames (list): List of asnames of imported modules.
+        
+        Returns:
+            dict: Dictionary of imported constants in the form of
+                name: str(constant)
+        """
+        imported_constants = dict()
+        for module in module_asnames:
+            traced_module = _trace_module(module, self.sourced_module)
+            obj = getattr(traced_module, module.split(".")[-1])
+            if type(obj) in self.primitives:
+                imported_constants[module] = str(obj)
+        return imported_constants
+    
+    def identify_body_variables(
+        self,
+        node: Union[ast.Module, ast.ClassDef]
+    ) -> list[str]:
+        """Identifies body level variables in a module or class."""
+        variables: list[str] = []
+        rest_nodes = [
+            subn
+            for subn in node.body
+            if not isinstance(subn, (
+                ast.Import,
+                ast.ImportFrom,
+                ast.FunctionDef,
+                ast.ClassDef,
+                ast.AsyncFunctionDef
+            ))
+        ]
+        for rest_node in rest_nodes:
+            # Ignore docstrings
+            if isinstance(rest_node, ast.Expr):
+                if isinstance(rest_node.value, ast.Constant):
+                    if isinstance(rest_node.value.value, str):
+                        continue
+            variables.append(ast.unparse(rest_node))
+        return variables
+
+    def identify_local_type_variables(
+        self,
+        node: Union[ast.Module, ast.ClassDef],
+        body_definiton_names: list[str],
+        modules_local: list[str]
+    ) -> dict[str, str]:
+        """
+        Identifies local type variables in a module or class.
+        
+        Args:
+            node (Union[ast.Module, ast.ClassDef]): Module or class node.
+            body_definiton_names (list[str]): List of names of functions
+                and classes defined in the module or class.
+            modules_local (list[str]): List of imported local module names.
+
+        Returns:
+            dict[str, str]: Dictionary of local type variables in the
+                form of {name:type}.
+        """
+        local_type_variables: dict[str, str] = dict()
+        rest_nodes = [
+            subn
+            for subn in node.body
+            if not isinstance(subn, (
+                ast.Import,
+                ast.ImportFrom,
+                ast.FunctionDef,
+                ast.ClassDef,
+                ast.AsyncFunctionDef
+            ))
+        ]
+        for rest_node in rest_nodes:
+            if isinstance(rest_node, ast.Assign):
+                if isinstance(rest_node.value, ast.Call):
+                    call_name = self.ast_visitor._get_function_name(
+                        rest_node.value.func
+                    )
+                    if (
+                        call_name in body_definiton_names or
+                        call_name in modules_local
+                    ):
+                        for target in rest_node.targets:
+                            if isinstance(target, ast.Name):
+                                local_type_variables[target.id] = type(
+                                    getattr(self.sourced_module, target.id)
+                                )
+                            if isinstance(target, ast.Tuple):
+                                for elt in target.elts:
+                                    if isinstance(elt, ast.Name):
+                                        local_type_variables[elt.id] = type(
+                                            getattr(
+                                                self.sourced_module,
+                                                elt.id
+                                            )
+                                        )
+        return local_type_variables
 
     def get_local_calls(
         self,
         node: Union[ast.FunctionDef, ast.AsyncFunctionDef],
         method: bool=False,
         class_name: Union[str, None]=None
-    ) -> set:
+    ) -> set[str]:
         """
         Returns all local calls inside a function or method definition.
 
@@ -665,8 +789,7 @@ class CodeAnalyser:
                 definition.
         """
         # Restore the visitor and collect function calls inside the node.
-        self.ast_visitor.func_names = set()
-        self.ast_visitor.instances = {}
+        _ = self.ast_visitor.restore_visitor()
         self.ast_visitor.visit(node)
         call_names: list[str] = list(self.ast_visitor.func_names)
         
@@ -678,12 +801,17 @@ class CodeAnalyser:
         for i, call in enumerate(call_names):
             splits = call.split('.')
             if len(splits) > 1:
-                if splits[0] in [*instances.keys()]:
-                    splits[0] = instances[splits[0]]
                 if method:
+                    # If it is called inside a class definition swap indicator
+                    # [self, cls, ...] with class name.
                     indicator = node.args.args[0].arg
                     if splits[0] == indicator:
                         splits[0] = class_name
+                else:
+                    # Else swap instance name with class name.
+                    if splits[0] in [*instances.keys()]:
+                        splits[0] = instances[splits[0]]
+                # Reconstruct call name
                 call_names[i] = '.'.join(splits)
         local_classes = list(self.modules_local) + self.body_class_names
         local_functions = list(self.modules_local) + self.body_func_names
@@ -709,21 +837,21 @@ class CodeAnalyser:
         """
         local_defs = ''
         for call in local_calls:
-            if self._is_method(call, self.sourced_module):
+            if _is_method(call, self.sourced_module):
                 # If call is a class method call
                 local_defs += (
                     "Method Definition for "
                     + call
                     + ":\n" 
-                    + self._trace_call(call, self.sourced_module)
+                    + _trace_call(call, self.sourced_module)
                     + "\n"
                 )
-                has_init = self._has_init(call, self.sourced_module)
+                has_init = _has_init(call, self.sourced_module)
                 if has_init and call.split(".")[-1] != "__init__":
                     local_defs += (
                         "Associated class __init__ definition:"
                         + "\n"
-                        + self._get_init(call, self.sourced_module)
+                        + _get_init(call, self.sourced_module)
                         + "\n"
                     )
                 else:
@@ -732,109 +860,104 @@ class CodeAnalyser:
                         "Definition for "
                         + call
                         + ":\n"
-                        + self._trace_call(call, self.sourced_module)
+                        + _trace_call(call, self.sourced_module)
                         + "\n"
                     )
         return local_defs
 
-    def _is_method(self, call_name: str, sourced_module: ModuleType) -> bool:
-        """Helper Function checks if a call is a class method"""
-        submodules = call_name.split('.')
-        for submodule in submodules[:-1]:
-            try:
-                sourced_module = getattr(sourced_module, submodule)
-            except:
-                return False
-        if (
-            inspect.isclass(sourced_module)
-            and callable(getattr(sourced_module, submodules[-1]))
-        ):
-            return True
-        return False
+
+# Helper Functions
+def _is_method(call_name: str, sourced_module: ModuleType) -> bool:
+    """
+    Helper Function checks if a call is a class method
     
-    def _has_init(
-        self,
-        call_name: str,
-        sourced_module: ModuleType
-    ) -> bool:
-        """
-        Checks if a class associated to call_name has an __init__
-            method definition.
-
-        Args:
-            call_name (str): Name of the call [method name].
-            sourced_module (ModuleType): Sourced module.
-
-        Returns:
-            bool: True if class has __init__ method definition.
-        """
-        submodules = call_name.split('.')
-        class_name = submodules[0]
+    Args:
+        call_name (str): Name of the cal
+        sourced_module (ModuleType): Sourced module to search in.
+    
+    Returns:
+        bool: True if call is a class method.
+    """
+    submodules = call_name.split('.')
+    for submodule in submodules[:-1]:
         try:
-            has_init = inspect.isfunction(
-                getattr(getattr(sourced_module, class_name), "__init__")
-            )
+            sourced_module = getattr(sourced_module, submodule)
         except:
             return False
-        return has_init
+    if (
+        inspect.isclass(sourced_module)
+        and callable(getattr(sourced_module, submodules[-1]))
+    ):
+        return True
+    return False
     
-    def _get_init(
-        self,
-        call_name: str,
-        sourced_module: ModuleType
-    ) -> str:
-        """
-        Given a method call name, returns corresponding class 
-        __init__ definition.
+def _has_init(call_name: str, sourced_module: ModuleType) -> bool:
+    """
+    Checks if a class associated to call_name has an __init__
+        method definition.
 
-        Args:
-            call_name (str): Name of the method call.
-            sourced_module (ModuleType): Sourced module.
-        
-        Returns:
-            str: source code of the __init__ definition.
-        """
-        submodules = call_name.split('.')
-        class_object = getattr(sourced_module, submodules[0])
-        return inspect.getsource(getattr(class_object, '__init__'))
+    Args:
+        call_name (str): Name of the call [method name].
+        sourced_module (ModuleType): Sourced module.
 
-    def _trace_module(
-        self,
-        module_name: str,
-        sourced_module: ModuleType
-    ) -> ModuleType:
-        """
-        Traces a module recursively until reaching the last submodule.
-        
-        Args:
-            module_name (str): Name of the module.
-            sourced_module (ModuleType): Sourced module.
-        
-        Returns:
-            ModuleType: last submodule.
-        """
-        submodules = module_name.split('.')
-        for submodule in submodules[:-1]:
-            sourced_module = getattr(sourced_module, submodule)
-        return sourced_module
+    Returns:
+        bool: True if class has __init__ method definition.
+    """
+    submodules = call_name.split('.')
+    class_name = submodules[0]
+    try:
+        has_init = inspect.isfunction(
+            getattr(getattr(sourced_module, class_name), "__init__")
+        )
+    except:
+        return False
+    return has_init
     
-    def _trace_call(
-        self,
-        call_name: str,
-        sourced_module: ModuleType
-    ) -> str:
-        """
-        Helper Function traces a call recursively until reaching
-        the function, method definition itself.
+def _get_init(call_name: str, sourced_module: ModuleType) -> str:
+    """
+    Given a method call name, returns corresponding class 
+    __init__ definition.
 
-        Args:
-            call_name (str): Name of the call.
-            sourced_module (ModuleType): Sourced module.
+    Args:
+        call_name (str): Name of the method call.
+        sourced_module (ModuleType): Sourced module.
+    
+    Returns:
+        str: source code of the __init__ definition.
+    """
+    submodules = call_name.split('.')
+    class_object = getattr(sourced_module, submodules[0])
+    return inspect.getsource(getattr(class_object, '__init__'))
 
-        Returns:
-            str: source code of the definiton.
-        """
-        submodules = call_name.split('.')
-        for submodule in submodules:
-            sourced_module = getattr(sourced_module, submodule)
-        return inspect.getsource(sourced_module)
+def _trace_module(module_name: str, sourced_module: ModuleType) -> ModuleType:
+    """
+    Traces a module recursively until reaching the last submodule.
+    
+    Args:
+        module_name (str): Name of the module.
+        sourced_module (ModuleType): Sourced module.
+    
+    Returns:
+        ModuleType: last submodule.
+    """
+    submodules = module_name.split('.')
+    for submodule in submodules[:-1]:
+        sourced_module = getattr(sourced_module, submodule)
+    return sourced_module
+    
+def _trace_call(call_name: str, sourced_module: ModuleType) -> str:
+    """
+    Helper Function traces a call recursively until reaching
+    the function, method definition itself.
+
+    Args:
+        call_name (str): Name of the call.
+        sourced_module (ModuleType): Sourced module.
+
+    Returns:
+        str: source code of the definiton.
+    """
+    submodules = call_name.split('.')
+    for submodule in submodules:
+        sourced_module = getattr(sourced_module, submodule)
+    return inspect.getsource(sourced_module)

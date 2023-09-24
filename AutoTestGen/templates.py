@@ -1,3 +1,4 @@
+from typing import Union
 INITIAL_SYSTEM_PROMPT: str = (
     "Generate high-quality comprehensive unit tests in {language} "
     "using {framework} library for provided {obj_desc}.\n"
@@ -9,7 +10,7 @@ INITIAL_SYSTEM_PROMPT: str = (
 )
 
 INITIAL_USER_PROMPT: str = (
-    "{obj_type} Definition:\n{source_code}\n\nINFO sheet:\n{info_sheet}"
+    "{object_type} Definition:\n{source_code}\n\nINFO sheet:\n{info_sheet}"
 )
 
 COMPILING_ERROR_REPROMPT: str = (
@@ -34,6 +35,7 @@ COMBINING_SAMPLES_PROMPT: str = (
     "explanation or any other text."
 )
 
+# Helper functions
 def list_errors(errors: list[tuple[str, str]]) -> str:
     """
     Returns a string containing test_name-error_msg pairs.
@@ -64,17 +66,17 @@ def combine_samples(samples: list[tuple]) -> str:
     )
     return combined_str
 
-
 def generate_python_info_sheet(
-    obj_type: str,
+    object_type: str,
     module_name: str,
     imports: str,
     constants: str, 
     variables: str,
+    local_type_variables: str,
     local_call_defs: str,
-    class_name: str='',
-    init: str='',
-    class_attributes: str='',
+    class_name: Union[str, None]=None,
+    init: Union[str, None]=None,
+    class_attributes: Union[str, None]=None,
 ) -> str:
     """
     Retunrs a string containing info about the module and the object 
@@ -95,48 +97,62 @@ def generate_python_info_sheet(
         init (str): definition of the __init__ method of the class.
         class_attributes (str): string containing class attributes.
     """
-    assert obj_type in ["class", "function"]
-
-    descr = class_name + " class" if obj_type == "class" else "Function"
-
-    info_sheet = (
-        f"1. {descr} is defined in the module called: {module_name}\n"
-    )
+    assert object_type in ["method", "function"]
+    
     n = 2
-    # Class specific
-    if obj_type == "class":
-        if init != "":
+    # Intro Points
+    if object_type == "method":
+        info_sheet = (
+            f"1. {class_name} class is defined in the module called: "
+            f"{module_name}\n"
+        )
+        if init:
             info_sheet += (
-                f"{n}. Class __init__ definition of {descr}:\n{init}\n"
+                f"2. Class __init__ definition of {class_name}:\n{init}\n"
             )
             n += 1
-        if class_attributes != "":
-            info_sheet += f"{n}. {descr} attributes:{class_attributes}\n"
+        if class_attributes:
+            info_sheet += f"3. {class_name} attributes:{class_attributes}\n"
             n += 1
+    elif object_type == "function":
+        info_sheet = (
+            f"1. Function is defined in the module called: {module_name}\n"
+        )
     
-    if imports != "":
+    # Further Points
+    if imports:
         info_sheet += (
             f"{n}. Following imports were made inside the {module_name} "
-            f"module:\n{imports}"
+            f"module:\n{imports}\n"
         )
         n += 1
-    if constants != "":
+
+    if constants:
         info_sheet += (
             f"{n}. Following constants were imported in the {module_name} "
-            f"module:\n{constants}"
+            f"module:\n{constants}\n"
         )
         n += 1
-    if variables != "":
+    
+    if variables:
         info_sheet += (
             f"{n}. Following variables were decleared in the {module_name} "
-            f"module body:\n{variables}"
+            f"module body:\n{variables}\n"
         )
         n += 1
+
+    if local_type_variables != "":
+        info_sheet += (
+            f"{n}. Additionally variable types for body-decleared variables"
+            f"whose types are not obvious:\n{local_type_variables}\n"
+        )
+        n += 1
+    
     if local_call_defs != "":
         info_sheet += (
-            f"{n}. Definitons of functions used inside the "
-            f"{'class method' if obj_type=='class ' else 'function '}"
+            f"{n}. Definitons of functions used inside the definition "
             f"body:\n{local_call_defs}"
         )
+
     return info_sheet
 

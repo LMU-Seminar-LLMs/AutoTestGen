@@ -643,6 +643,7 @@ class ChatFrame(ttk.Frame):
                 max_iter=self.master.utils_frame.max_iter,
                 logger=self.master.logger
             )
+            metadata = result["report"]
             self.update_state(
                 [{"role": "assistant", "content": result["test"]}]
             )
@@ -678,7 +679,7 @@ class ChatFrame(ttk.Frame):
             )
             raise
 
-        if result["report"]["compile_error"]:
+        if metadata["compile_error"]:
             messagebox.showinfo(
                 "Info",
                 message= (
@@ -689,13 +690,13 @@ class ChatFrame(ttk.Frame):
             )
             messagebox.showerror(
                 "Compile Error",
-                result["report"]["compile_error"]
+                metadata["compile_error"]
             )
             self.master.logger.warning(
-                f"compiling error: {result['report']['compile_error']}"
+                f"compiling error: {metadata['compile_error']}"
             )
 
-        elif result["report"]["errors"]:
+        elif metadata["errors"]:
             messagebox.showinfo(
                 "Info",
                 (
@@ -706,10 +707,10 @@ class ChatFrame(ttk.Frame):
             )
             messagebox.showerror(
                 "Test Error",
-                result["report"]["errors"]
+                metadata["errors"]
             )
             self.master.logger.warning(
-                f"test error: {result['report']['errors']}"
+                f"test error: {metadata['errors']}"
             )
         
         else:
@@ -720,7 +721,7 @@ class ChatFrame(ttk.Frame):
                     object_name=obj_name,
                     history=json.dumps(result["messages"]),
                     test=result["test"],
-                    metadata=json.dumps(result["report"])
+                    metadata=json.dumps(metadata)
                 )
                 self.master.logger.info(
                     "Tests successfully added to the database"
@@ -729,18 +730,13 @@ class ChatFrame(ttk.Frame):
                 self.master.logger.warning(
                     f"Error occured while populating database: {e}"
                 )
-
-            # Mimic data from database
-            data = [
-                (0, "mod", class_name, obj_name, json.dumps(result["report"]))
-            ]
-            cov = self.master.utils_frame.compute_coverage(
-                data,
-                obj_type="class method" if class_name else "function"
+            # Compute coverage
+            cov = utils.compute_coverage(
+                obj_name, obj_type, [metadata], class_name
             )
             cov_report = {
-                "n_tests": result["report"]["tests_ran_n"],
-                "failed": len(result["report"]["failures"]),
+                "n_tests": metadata["tests_ran_n"],
+                "failed": len(metadata["failures"]),
                 "coverage": cov
             }
             messagebox.showinfo(
@@ -879,11 +875,11 @@ class UtilsFrame(ttk.Frame):
         """Loads test state from the database"""
         item = self.tests_window.focus()
         if not item: return
-        prim_key = self.tests_window.item(item)["tags"][1]
+        prim_key = self.tests_window.item(item)["tags"][0]
         data = self.master.db_manager.get_row_from_db(prim_key)
         if data:
             # If system message is present, avoid repeating it.
-            messages: list[str, str] = json.loads(data[4])
+            messages: list[str, str] = json.loads(data["history"])
             if self.master.chat_frame.chat_state:
                 messages = messages[1:]
             for msg in messages:
@@ -905,53 +901,19 @@ class UtilsFrame(ttk.Frame):
         Returns:
             int between 0 and 100.
         """
-        data = [self.master.db_manager.get_row_from_db(id)]
+        data = self.master.db_manager.get_row_from_db(id)
         if data:
-            if data[0][2]:
-                return self.compute_coverage(data, "class method")
-            else:
-                return self.compute_coverage(data, "function")
+            object_type = "class method" if data["class"] else "function"
+            metadata: list[dict] = [json.loads(data["metadata"])]
+            cov = utils.compute_coverage(
+                data["object"],
+                object_type,
+                metadata,
+                class_name=data["class"]
+            )
+            return cov
         else:
             return 0
-        
-    def collect_exec_miss_lines(
-        self,
-        data: list[tuple],
-        obj_type: str
-    ) -> tuple[set, set]:
-        """Get executed and missing lines from a list of tests"""
-        # Get line numbers
-        if obj_type == "class":
-            class_name = data[0][2]
-            st, end, _ = utils.find_lines(class_name, obj_type)
-        else:
-            class_name, obj_name = data[0][2:4]
-            st, end, _ = utils.find_lines(obj_name, obj_type, class_name)
-
-        metadata = [json.loads(row[-1]) for row in data]
-        # Collect Executed and missing lines in a set
-        exec_lines = [method["executed_lines"] for method in metadata]
-        miss_lines = [method["missing_lines"] for method in metadata]
-        execs = {it for subl in exec_lines for it in subl if st <= it <= end}
-        miss = {it for subl in miss_lines for it in subl if st <= it <= end}
-        return execs, miss.difference(execs)
-    
-    def compute_coverage(self, data: list[tuple], obj_type: str) -> int:
-        """
-        Computes accumulated coverage for a list of tests of the same object.
-        
-        Args:
-            data: list of tuples with data from database.
-            type: One of ['function', 'class', 'class method'].
-        
-        Returns:
-            int between 0 and 100.
-        """
-        if not data:
-            return 0
-        execs, miss = self.collect_exec_miss_lines(data, obj_type)
-        return int(len(execs) / (len(execs) + len(miss)) * 100)
-
         
     def gen_tests(self, event=None) -> None:
         """Generates tests for selected object"""
@@ -1033,31 +995,49 @@ class UtilsFrame(ttk.Frame):
         
         for func_name in func_names:
             data = self.master.db_manager.get_function_tests(func_name)
-            cov = self.compute_coverage(data, "function")
+            test_metadata = [json.loads(row["metadata"]) for row in data]
+            cov = utils.compute_coverage(func_name, "function", test_metadata)
             self.workst_tree.insert(
                 parent="",
                 index="end",
                 text=func_name,
                 values=("function", cov)
             )
-        for cls in class_names:
-            data_cls = self.master.db_manager.get_class_tests(cls)
-            cov_cls = self.compute_coverage(data_cls, "class")
+        for class_name in class_names:
+            data_cls = self.master.db_manager.get_class_tests(class_name)
+            test_metadata = [json.loads(row["metadata"]) for row in data_cls]
+            cov_class = utils.compute_coverage(
+                class_name,
+                "class",
+                test_metadata
+            )
             item_id = self.workst_tree.insert(
                 parent="",
                 index="end",
-                text=cls,
-                values=("class", cov_cls)
+                text=class_name,
+                values=("class", cov_class)
             )
-            methods = config.ADAPTER.retrieve_class_methods(cls)
-            for met in methods:
-                data_met = self.master.db_manager.get_method_tests(cls, met)
-                cov_met = self.compute_coverage(data_met, "class method")
+            methods = config.ADAPTER.retrieve_class_methods(class_name)
+            for method in methods:
+                data_method = self.master.db_manager.get_method_tests(
+                    class_name,
+                    method
+                )
+                test_metadata_method = [
+                    json.loads(row["metadata"])
+                    for row in data_method
+                ]
+                cov_method = utils.compute_coverage(
+                    method,
+                    "class method",
+                    test_metadata_method,
+                    class_name
+                )
                 self.workst_tree.insert(
                     item_id,
                     "end",
-                    text=met,
-                    values=("class method", cov_met)
+                    text=method,
+                    values=("class method", cov_method)
                 )
         
     def open_cov_report(self) -> None:
@@ -1080,21 +1060,29 @@ class UtilsFrame(ttk.Frame):
                 class_name,
                 obj_name
             )
+        metadata = [json.loads(row["metadata"]) for row in data]
 
-        __ = self.display_coverage_report(obj_name, obj_type, data, class_name)
+        __ = self.display_coverage_report(
+            obj_name, obj_type, metadata, class_name
+        )
 
     def display_coverage_report(
         self,
         obj: str,
         obj_type: str,
-        data: list[tuple],
+        metadata: list[dict],
         class_name: Union[str, None]=None
     ) -> None:
         """Displays coverage report in new window"""
         cov_report = CovWindow()
         start, _, lines = utils.find_lines(obj, obj_type, class_name)
-        if data:
-            lns_ex, lns_miss = self.collect_exec_miss_lines(data, obj_type)
+        if metadata:
+            lns_ex, lns_miss = utils.collect_executed_missing_lines(
+                obj,
+                obj_type,
+                metadata,
+                class_name
+            )
         else:
             lns_ex, lns_miss = set(), set()
         cov_report.populate_text(lines, start, lns_ex, lns_miss)
@@ -1203,26 +1191,25 @@ class TestsTree(ttk.Treeview):
         elif obj_type == "function":
             data = self.master.master.db_manager.get_function_tests(obj)
     
-        for i, (prim_id, _, cl_n, obj, _, test, metadata) in enumerate(data):
-            metadata_dict = json.loads(metadata)
-            obj_type = "class method" if cl_n else "function"
-            cov = self.master.get_test_coverage(prim_id)
+        for i, data in enumerate(data[::-1]):
+            metadata_dict = json.loads(data["metadata"])
+            cov = self.master.get_test_coverage(data["id"])
             self.insert(
                 parent="",
                 index="end",
                 text=i+1,
                 values=(
-                    obj,
+                    data["object"],
                     metadata_dict["tests_ran_n"],
                     len(metadata_dict["failures"]),
                     cov
                 ),
-                tags=(test, prim_id, obj_type, metadata, cl_n)
+                tags=(data["id"], data["test"])
             )
 
     def save_test(self) -> None:
         """Saves selected test to a file"""
-        test = self.item(self.focus())["tags"][0]
+        test = self.item(self.focus())["tags"][1]
         file = filedialog.asksaveasfile(
             mode="w",
             defaultextension=".py",
@@ -1236,8 +1223,8 @@ class TestsTree(ttk.Treeview):
         """Reruns selected test"""
         item = self.focus()
         if not item: return
-        test = self.item(item)["tags"][0]
-        primary_id = self.item(item)["tags"][1]
+        test = self.item(item)["tags"][1]
+        primary_id = self.item(item)["tags"][0]
         try:
             result = self.master.master.cont_manager.run_tests_in_container(
                 test
@@ -1289,26 +1276,33 @@ class TestsTree(ttk.Treeview):
     
     def delete_test(self):
         """Deletes selected test from the database"""
-        primary_id = self.item(self.focus())["tags"][1]
+        primary_id = self.item(self.focus())["tags"][0]
         self.master.master.db_manager.delete_row_from_db(primary_id)
         self.delete(self.focus())
     
     def open_cov_report(self):
         """Opens coverage report for selected test"""
         item = self.focus()
-        if not item: return
+        if not item:
+            return
         obj = self.item(item)["values"][0]
-        obj_type = self.item(item)["tags"][2]
-        class_name = self.item(item)["tags"][4]
-        id = self.item(item)["tags"][1]
-        data = [self.master.master.db_manager.get_row_from_db(id)]
-        self.master.display_coverage_report(obj, obj_type, data, class_name)
+        prim_id = self.item(item)["tags"][0]
+        data = self.master.master.db_manager.get_row_from_db(prim_id)
+        metadata = [json.loads(data["metadata"])]
+        class_name = data["class"]
+        obj_type = "class method" if class_name else "function"
+        self.master.display_coverage_report(
+            obj, obj_type, metadata, class_name
+        )
     
     def see_failures(self):
         """Displays failures in a new window"""
         item = self.focus()
         if not item: return
-        failures = json.loads(self.item(item)["tags"][3])["failures"]
+        prim_id = self.item(item)["tags"][0]
+        data = self.master.master.db_manager.get_row_from_db(prim_id)
+        metadata = json.loads(data["metadata"])
+        failures = metadata["failures"]
         fail_window = tk.Toplevel(self)
         fail_window.title("Failures")
         fail_window.geometry("800x600")
@@ -1326,8 +1320,8 @@ class TestsTree(ttk.Treeview):
         item = self.focus()
         if item:
             obj = self.item(item)["values"][0]
-            test = self.item(item)["tags"][0]
-            test_id = self.item(item)["tags"][1]
+            test_id = self.item(item)["tags"][0]
+            test = self.item(item)["tags"][1]
             TestWindow(self.master, obj, test_id, test)
 
     def clear_tree(self, event=None) -> None:
@@ -1631,8 +1625,13 @@ class Statistics(tk.Toplevel):
         """Populates table with token usage statistics."""
         self.table.delete(*self.table.get_children())
         data = self.master.master.db_manager.get_usage_data()
-        for row in data:
-            self.table.insert("", "end", text="", values=row)
+        for r in data:
+            self.table.insert(
+                "",
+                "end",
+                text="",
+                values=(r["model"], r["input_tokens"], r["output_tokens"])
+            )
         self.table.pack(fill="both", expand=True)
 
 class LogConsole(scrolledtext.ScrolledText):
