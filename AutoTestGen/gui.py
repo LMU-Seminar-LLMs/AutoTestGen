@@ -871,7 +871,6 @@ class ChatFrame(ttk.Frame):
                     "object in the Table on the right.\n" + str(cov_report)
                 )
             )
-            self.master.refresh()
         
     def display_message(self, message: str, tag: str) -> None:
         """
