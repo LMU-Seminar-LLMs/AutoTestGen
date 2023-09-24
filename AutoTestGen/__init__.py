@@ -1,2 +1,2 @@
 from __future__ import annotations
-from .test_generator import TestGenerator
+from .test_generator import TestGenerator, adapter_registry

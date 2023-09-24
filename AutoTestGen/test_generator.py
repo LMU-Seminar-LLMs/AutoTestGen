@@ -1,21 +1,19 @@
 import openai
 from . import language_adapters
 import tiktoken
-from typing import Type, TYPE_CHECKING
+from typing import Type
 
 adapter_registry = {
     "python": language_adapters.PythonAdapter,
-    "java": language_adapters.JavaAdapter,
-    "r": language_adapters.RAdapter
+    "r": language_adapters.RAdapter,
+    "java": language_adapters.JavaAdapter
 }
 
-
 class TestGenerator:
-    _api_key: str
-    _org_key: str
-    _model: str
-    _tokenizer: tiktoken.core.Encoding
-    _adapter: Type[language_adapters.BaseAdapter]
+    _api_key: str=None
+    _org_key: str=None
+    _model: str=None
+    _adapter: Type[language_adapters.BaseAdapter]=None
 
     @classmethod
     def get_prompt(cls, obj_name, method=None):
@@ -38,8 +36,8 @@ class TestGenerator:
     @classmethod
     def count_tokens(cls, string):
         """Returns the number of tokens in a text string."""
-        return  len(cls._tokenizer(string))
-    
+        tokenizer = tiktoken.encoding_for_model(cls._model)
+        return  len(tokenizer(string))
 
     @classmethod
     def authenticate(cls, api_key:str, org_key=None) -> None:
@@ -53,21 +51,20 @@ class TestGenerator:
     def set_model(cls, model: str="gpt-3.5-turbo") -> None:
         """Defaults to gpt-3.5-turbo"""
         cls._model = model
-        cls._tokenizer = tiktoken.encoding_for_model(cls._model)
     
     @classmethod
-    def configure_adapter(cls, language, module):
+    def configure_adapter(cls, language, module, library=None) -> None:
         languages_aval = [*adapter_registry.keys()]
         if language not in languages_aval:
             raise ValueError(f"Supported Programming Languages: {languages_aval}")
-        cls._adapter = adapter_registry[language](module)
+        cls._adapter = adapter_registry[language](module, library)
 
     @classmethod
-    def _check_authentication(cls):
+    def _check_authentication(cls) -> None:
         if cls._api_key is None:
             raise Exception("API not authenticated. Please call the 'authenticate' method first.")
     @classmethod
-    def _check_model(cls):
+    def _check_model(cls) -> None:
         if cls._model is None:
             raise Exception("Please select a model endpoint calling 'set_model' method first.")
         
