@@ -1,535 +1,889 @@
 from .base_adapter import BaseAdapter
 import ast
 import os
+import json
 import sys
 import inspect
-import importlib
-import pkgutil
+import importlib, importlib.util
 from typing import Union
+from types import ModuleType
 import tempfile
 import unittest
 import coverage
 import traceback
+from ..templates import INITIAL_SYSTEM_PROMPT, INITIAL_USER_PROMPT, generate_python_info_sheet
 
-# Import Visitor
-class ImportVisitor(ast.NodeVisitor):
-    def __init__(self):
-        # modules is a dict of asname:module pair
-        self.modules = dict()
-        self.import_string = ''
 
-    def visit_Import(self, node):
-        self.import_string += f"\n{ast.unparse(node)}"
+class AstVisitor(ast.NodeVisitor):
+    def __init__(self, sourced_module: ModuleType):
+        self.sourced_module = sourced_module
+        self.imports_string : str = ''
+        self.modules : dict[str, str] = dict()
+        self.func_names : set = set()
+        self.instances : dict = dict()
+
+
+    def visit_Import(self, node) -> None:
+        self.imports_string += f"\n{ast.unparse(node)}"
         for alias in node.names:
             if alias.asname:
+                # Alias import
                 self.modules[alias.asname] = alias.name
             else:
+                # Simple import
                 self.modules[alias.name] = alias.name
         self.generic_visit(node)
-
-    def visit_ImportFrom(self, node):
+    
+    def visit_ImportFrom(self, node) -> None:
         module = node.module
         if module:
-            self.import_string += f"\n{ast.unparse(node)}" 
+            self.imports_string += f"\n{ast.unparse(node)}"
             for alias in node.names:
+                # From import with alias
                 if alias.asname:
                     self.modules[alias.asname] = module
                 else:
-                    self.modules[alias.name] = module
+                    # Simple from import
+                    if alias.name != '*':
+                        self.modules[alias.name] = module
+                    else:
+                        # dynamically import module
+                        module_asterisked = importlib.import_module(module)
+                        # add all names to the namespace except imported modules inside that module
+                        module_asterisked_imports = inspect.getmembers(module_asterisked, inspect.ismodule)
+                        module_asterisked_import_names = [name for name, _ in module_asterisked_imports]
+                        self.modules.update(
+                            {name: module
+                             for name in dir(module_asterisked)
+                             if not name.startswith('__') and name not in module_asterisked_import_names}
+                        ) 
         else:
             self.visit_Import(node)
         self.generic_visit(node)
 
-# Call visitor
-class CallVisitor(ast.NodeVisitor):
-    def __init__(self, sourced_module):
-        self.sourced_module = sourced_module
-        self.func_names = set()
-        self.instances = {}
-    def get_function_name(self, node):
-        if isinstance(node, ast.Name):
-            return node.id
-        elif isinstance(node, ast.Attribute):
-            return self.get_function_name(node.value) + '.' + node.attr
-    
-    def visit_Call(self, node):
-        fun_name = self.get_function_name(node.func)
+    def visit_Call(self, node) -> None:
+        """Collects function names from Call nodes"""
+        fun_name = self._get_function_name(node.func)
         if fun_name:
             self.func_names.add(fun_name)                
         self.generic_visit(node)
     
-    def visit_Assign(self, node):
+    def visit_Assign(self, node) -> None:
+        """Searches for class instance creations and collects them to track their methods later"""
         for target in node.targets:
-            if isinstance(target, ast.Tuple):
+            # Simple single target:call assignment
+            if isinstance(target, ast.Name):
+                if isinstance(node.value, ast.Call):
+                    func_name = self._get_function_name(node.value.func)
+                    if self._is_class(func_name, self.sourced_module):
+                        self.instances[target.id] = func_name 
+            elif isinstance(target, ast.Tuple):
+                # Tuple assignment with multiple targets
                 for target_name, value in zip(target.dims, node.value.dims):
                     if isinstance(value, ast.Call):
-                        func_name = self.get_function_name(value.func)
-                        if self._check_func_name(func_name, self.sourced_module):
+                        func_name = self._get_function_name(value.func)
+                        if self._is_class(func_name, self.sourced_module):
                             self.instances[target_name.id] = func_name
-            
-            elif isinstance(target, ast.Name):
-                if isinstance(node.value, ast.Call):
-                    func_name = self.get_function_name(node.value.func)
-                    if self._check_func_name(func_name, self.sourced_module):
-                        self.instances[target.id] = func_name
     
     def visit_AnnAssign(self, node):
+        """
+        Searches for class instance creations and collects them to track their methods later.
+        Serves for the special case of annotated assignments.
+        """
         if isinstance(node.value, ast.Call):
-            func_name = self.get_function_name(node.value.func)
-            if self._check_func_name(func_name, self.sourced_module):
+            # simple annotated assignment
+            func_name = self._get_function_name(node.value.func)
+            if self._is_class(func_name, self.sourced_module):
                 self.instances[node.traget.id] = func_name
+        
         if node.value is None:
-            # Case of annotations
+            # Hint annotation without actual value assignment
             if isinstance(node.annotation, ast.Name):
-                class_name = self.get_function_name(node.annotation)
+                class_name = self._get_function_name(node.annotation)
             if isinstance(node.annotation, ast.Subscript):
-                class_name = self.get_function_name(node.annotation.slice)
-            if self._check_func_name(class_name, self.sourced_module):
+                class_name = self._get_function_name(node.annotation.slice)
+            if self._is_class(class_name, self.sourced_module):
                 self.instances[node.target.id] = class_name
-    
-    def _check_func_name(self, func_name, sourced_module):
+
+    def _is_class(self, func_name, sourced_module) -> bool:
+        """Helper function for Assign visitors. Checks if a function call is a class [instance creation]"""
         submodules = func_name.split('.')
         if func_name in dir(sourced_module) or submodules[0] in dir(sourced_module):
             if len(submodules) != 1:
                 func_name = submodules[-1]
                 for submodule in submodules[:-1]:
                     sourced_module = getattr(sourced_module, submodule)
-            if inspect.isclass(getattr(sourced_module, func_name)):
-                return True
+                if sourced_module is not None:
+                    return inspect.isclass(getattr(sourced_module, func_name))
         return False
 
+    def _get_function_name(self, node) -> str:
+        """Helper function for visit_Call. Returns function name from a Call node through recursion"""
+        if isinstance(node, ast.Name):
+            return node.id
+        elif isinstance(node, ast.Attribute):
+            return self._get_function_name(node.value) + '.' + node.attr
+        elif isinstance(node, ast.Call):
+            return self._get_function_name(node.func)
+        elif isinstance(node, ast.Constant):
+            return node.value
 
-class PythonAdapter(BaseAdapter):
-    def __init__(self, module: str, library: str=None, testing_framework: str="unittest"):
-        super().__init__(language="python", testing_framework=testing_framework)
-        self.suffix = ".py"
-        self.library = library
-        self.module = module
-        if library is not None:
-            self.library_imported = importlib.import_module(library)
-            if not hasattr(self.library_imported, '__path__'):
-                raise ValueError(f"{library} should be an installed package. Install the package locally first.")
-        else:
-            self.library_imported = None
 
+class PromptPreparer:
+    def __init__(self, sourced_module: ModuleType):
         # Start-up
-        self.sourced_module = self._source_module(module)
-        self.source_code = self._get_module_code(module)
-        self.syntax_tree = self._build_ast(self.source_code)
-        self.modules_local, self.modules_all = self._get_local_modules(self.syntax_tree)
+        self.sourced_module = sourced_module
+        self.source_code = inspect.getsource(sourced_module)
+        self.syntax_tree = ast.parse(self.source_code)
+
+        # Body Class Nodes
+        self.body_class_nodes = [subn for subn in self.syntax_tree.body if isinstance(subn, ast.ClassDef)]
+        self.body_class_names = [node.name for node in self.body_class_nodes]
+        # Body Func Nodes
+        self.body_func_nodes = [subn for subn in self.syntax_tree.body if isinstance(subn, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        self.body_func_names = [node.name for node in self.body_func_nodes]
+
+        self.ast_visitor = AstVisitor(self.sourced_module)
+        # Run the visitor on the syntax tree except the FunctionDef, ClassDef and AsyncFunctionDef nodes
+        for node in self.syntax_tree.body:
+            if not isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.ast_visitor.visit(node)
         
+        # 1. Imports string
+        self.imports_string = self.ast_visitor.imports_string
+        self.modules_all = [*self.ast_visitor.modules.keys()]
+        self.modules_local = self.get_local_modules(self.modules_all)
+        
+        # 2. Imported constants string
         # primitives for identifying constants
         self.primitives = (str, int, float, complex, list, tuple,
                       range, dict, set, frozenset, bool, bytes, bytearray, memoryview, type(None))
+        self.imported_constants_str = self.get_imported_constants_str(self.modules_all)
         
-        # Body
-        self.imports_string = self._get_imports_string(self.syntax_tree)
-        self.imported_constants_str = self._get_imported_constants(self.modules_all)
-        self.body_class_nodes = self._get_body_class_nodes(self.syntax_tree)
-        self.body_func_nodes = self._get_body_func_nodes(self.syntax_tree)
-        self.body_funcs = [node.name for node in self.body_func_nodes]
-        self.body_classes = [node.name for node in self.body_class_nodes]
-        self.constants_string = self._get_body_constants_str(self.syntax_tree)
-        self.body_instances = self._get_body_instances(self.syntax_tree)
+        # 3. Body variable assignments
+        self.variables_string = self.get_body_variables_str(self.syntax_tree)
 
-    def retrieve_func_defs(self):
-        """Returns list of function names avaliable for testing"""
-        return self.body_funcs
-
-    def retrieve_class_defs(self):
-        """Returns list of class names avaliable for testing"""
-        return self.body_classes
-    
-    def prepare_prompt(self, obj_name: str, method_name: str=None):
-        """
-        Prepare prompts (list of messages) for the API.
-
-        Parameters:
-            obj_name (list): Name of an object (class- or function- definition) to test.
-
-        Returns:
-            list: containing messages for API.
-
-        Raises:
-            ValueError: If the provided obj_name or method_name cannot be found in given module or script.
-        """
+        # 4. Identify body Instances
+        self.body_instances = {
+            k:v for k, v in self.ast_visitor.instances.items()
+            if v in self.body_class_names or v.split(".")[0] in self.modules_local
+        }
         
-        if obj_name not in self.body_funcs + self.body_classes:
-            raise ValueError(f"There is no class or function definition called: {obj_name} in the {self.module}")
-        elif obj_name in self.body_funcs:
-            messages = self._prepare_prompt_func(obj_name)
-        elif obj_name in self.body_classes:
-            messages = self._prepare_prompt_class(obj_name, method_name)
-        return messages
-    
-    def run_tests_with_coverage(self, test_source):
-        """
-        Takes ChatGPT generated string code for tests runs them while tracking coverage.
-
-        Parameters:
-            test_source (str): Response string returned by the OpenAI API.
-
-        Returns:
-            (Coverage.control.Coverage) instance for coverage results.
-            (unittest.runner.TextTestResult) instance for test results.
-            
-        Exception:
-            If their is a problem compiling the code provided by ChatGPT, exception message string is returned for reprompting purposes.
-        """
-
-        # Before We start tracking coverage we unload the module so the definiton lines are tracked correctly
-        if self.library:
-            del(sys.modules[self.library + "." + self.module[:-3]])
-        else:
-            del(sys.modules[self.module[:-3]])
-        
-        # Start Recording Coverage
-        cov = coverage.Coverage(source=["module1"], messages=True)
-        cov.start()
-        # Setup Temporary file for Test code
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=self.suffix) as temp_file:
-            temp_file.write(test_source)
-            temp_fn = temp_file.name
-        # Setup file for coverage report
-        cov_report = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".json")
-        
-        try:
-            # Try Loading Temp file as module: Checks if provided code by ChatGPT is a valid module/script
-            spec = importlib.util.spec_from_file_location(os.path.basename(temp_fn)[:-3], temp_fn)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-        
-        except Exception as e:
-            return None, traceback.format_exception_only(type(e), e)
-        
-        finally:
-            # Close and delete temp files
-            temp_file.close(), cov_report.close()
-            os.remove(temp_fn), os.remove(cov_report.name)
-        
-        # Set-up Tests
-        test_loader = unittest.TestLoader()
-        test_suite = test_loader.loadTestsFromModule(module=module)
-        runner = unittest.TextTestRunner(verbosity=2, warnings=False)
-        # Run Tests
-        result = runner.run(test_suite)
-        cov.stop()
-        cov.save()
-        return result, cov
-
-    def _prepare_prompt_func(self, name: str):
-        """Helper Function for 'prepare_prompt' to generate Prompts for testing a Function definition."""
-        n = 0
-        node = self.body_func_nodes[self.body_funcs.index(name)]
-        # System
-        system_content = f'Generate high-quality comprehensive Unit-Tests in {self.language} '\
-            f'using {self.framework} library for provided Function Definiton. '\
-            f'Next to the Function Definiton you will be provided with numbered INFO Sheet that might be useful in generating finer Unit-Tests. '\
-            f'You do not necessarily have to use all the information from the INFO sheet, but only the relevant parts. '\
-            f'Your renspose should be just {self.language} code without explanation.'
-        
-        # INFO Sheet
-        user_content = f'Function Definition:\n{ast.unparse(node)}\n\nINFO Sheet:'
-        
-        # INFO Sheet: location
-        n += 1
-        user_content = f'{user_content}\n{n}. '\
-            f"Function is defined in '{self.module[:-3]}' module"
-        if self.library:
-            user_content = user_content + f' of {self.library} package'
-
-        # INFO Sheet: Imports
-        if self.imports_string != '':
-            n += 1
-            user_content = f'{user_content}\n{n}. '\
-                f'Following imports were made to the namespace:{self.imports_string}'
-        
-        # INFO Sheet: Imported Constants
-        if self.imported_constants_str != '':
-            n += 1
-            user_content = f'{user_content}\n{n}. '\
-                f'Following Constants were imported to the namespace:{self.imported_constants_str}'
-
-        # INFO Sheet: Variables
-        if self.constants_string != '':
-            n += 1
-            user_content = f'{user_content}\n{n}. '\
-                f'Following Variables were decleared in the namespace:{self.constants_string}'
-
-        # INFO Sheet: Definitions of calls of functions and methods defined locally
-        local_calls = self._get_relevant_calls(node)
-        if not len(local_calls):
-            for call in local_calls:
-                n += 1
-                if self._is_method(call, self.sourced_module):
-                    user_content = f'{user_content}\n{n}. '\
-                        f'Method Definition for {call}:\n{self._trace_call(call, self.sourced_module)}'
-                    if self._has_init(call, self.sourced_module):
-                        user_content = f"{user_content}\n'Associated class __init__ definition:\n{self._get_init(call, self.sourced_module)}"
-                else:
-                    user_content = f'{user_content}\n{n}. '\
-                        f'Definiton for {call}:\n{self._trace_call(call, self.sourced_module)}'
-        messages = [
-            {'role': 'system', 'content': system_content},
-            {'role': 'user', 'content': user_content}
-        ]
-        return messages
-
-    def _prepare_prompt_class(self, name: str, method_name):
-        """Helper Function for 'prepare_prompt' to generate Prompts for testing a Class definition."""
-        n = 0
-        # Selected class node
-        class_node = self.body_class_nodes[self.body_classes.index(name)]
-        method_nodes = self._get_body_func_nodes(class_node)
-        method_names = [method.name for method in method_nodes]
-        attributes_str = self._get_body_constants_str(class_node)
-
-        if method_name is not None:
-                if method_name not in method_names:
-                    raise ValueError(f"There is no method called: {method_name} in class definiton for: {class_node.name}")
-                else:
-                    method_selected = [method_nodes[method_names.index(method_name)]]
-        else:
-            method_selected = method_nodes.copy()
-
-        for node in method_selected:
-            n = 0
-            print(f"Starting generating Tests for method: {node.name}")
-
-            # System
-            system_content = f'Generate high-quality comprehensive Unit-Tests in {self.language} '\
-                f'using {self.framework} library for provided Classmethod Definiton of a class called: {class_node.name}. '\
-                f'Next to the Classmethod Definiton you will be provided with numbered INFO Sheet that might be useful in generating finer Unit-Tests. '\
-                f'You do not necessarily have to use all the information from the INFO sheet, but only the relevant parts. '\
-                f'Your renspose should be just {self.language} code without explanation.'
-
-            # INFO Sheet:
-            user_content = f'Classmethod Definition:\n{ast.unparse(node)}\n\nINFO Sheet:'
-            
-            # INFO Sheet: Location
-            n += 1
-            user_content = f'{user_content}\n{n}. '\
-                f"Class is defined in '{self.module[:-3]}' module"
-            if self.library:
-                user_content = user_content + f" of '{self.library}' package"
-
-            # INFO Sheet: __init__ if avaliable
-            if '__init__' in method_names and node.name != '__init__':
-                n += 1
-                user_content = f'{user_content}\n{n}. '\
-                    f"Definition of Class __init__:\n{ast.unparse(method_nodes[method_names.index('__init__')])}"
-            
-            # INFO Sheet: Class Attributes
-            if attributes_str != '':
-                n += 1
-                user_content = f'{user_content}\n{n}. '\
-                    f'Class contains following attributes:{attributes_str}'
-
-            # INFO Sheet: Imports
-            if self.imports_string != '':
-                n += 1
-                user_content = f'{user_content}\n{n}. '\
-                    f'Following imports were made to the namespace:{self.imports_string}'
-            
-            # INFO Sheet: Imported Constants
-            if self.imported_constants_str != '':
-                n += 1
-                user_content = f'{user_content}\n{n}. '\
-                    f'Following Constants were imported to the namespace:{self.imported_constants_str}'
-
-            # INFO Sheet: Variables        
-            if self.constants_string != '':
-                n += 1
-                user_content = f'{user_content}\n{n}. '\
-                    f'Following Variables were decleared in the namespace:{self.constants_string}'
-            
-            # INFO Sheet: Definitions of calls of functions and methods defined locally
-            local_calls = self._get_relevant_calls(node, method=True, class_name=node.name)
-            if not len(local_calls):
-                for call in local_calls:
-                    n += 1
-                    if self._is_method(call, self.sourced_module):
-                        user_content = f'{user_content}\n{n}. '\
-                            f'Method Definition for {call}:\n{self._trace_call(call, self.sourced_module)}'
-                        if self._has_init(call, self.sourced_module, omit=class_node.name):
-                            user_content = f"{user_content}\n'Associated class __init__ definition:\n{self._get_init(call, self.sourced_module)}"
-                    else:
-                        user_content = f'{user_content}\n{n}. '\
-                            f'Definiton for {call}:\n{self._trace_call(call, self.sourced_module)}'
-
-        messages = [
-            {'role': 'system', 'content': system_content},
-            {'role': 'user', 'content': user_content}
-        ]
-        return messages
-
-    def _source_module(self, module:str):
-        if not module.endswith(self.suffix):
-            raise Exception(f"Module should be a python module with a {self.suffix} extension")
-        if self.library_imported is None:
-            sourced_module = importlib.import_module(module[:-3])
-        else:
-            sourced_module = getattr(self.library_imported, module[:-3])
-        return sourced_module
-        
-    def _get_module_code(self, module:str):
-        if self.library_imported is None:
-            with open(module, "r") as file:
-                source_code = file.read()
-        else:
-            source_code = inspect.getsource(getattr(self.library_imported, module[:-3]))
-        return source_code
-
-    def _build_ast(self, source_code:str):
-        return ast.parse(source_code)
-    
-    def _get_local_modules(self, module_ast: ast.Module):
-        # Identifies local modules, returns list of strings (module asnames)
-        import_visitor = ImportVisitor()
-        import_visitor.visit(module_ast)
-        # Extract module names
-        imported_mods = [*import_visitor.modules.values()]
-        modules_all= [*import_visitor.modules.keys()]
-        modules_local = set()
-        if self.library_imported is not None:
-            submodules = [submod.name for submod in [*pkgutil.iter_modules(self.library_imported.__path__)]]
-        else:
-            dir_path = os.path.dirname(os.path.join(os.getcwd(), self.module))
-        
-        for mod in imported_mods:
-            # Package case
-            if self.library_imported is not None:
-                check = mod.startswith(".") or mod.startswith(f"{self.library}.") or mod == {self.library} or mod in submodules
-            else:
-            # Just module case
-                local_files = [fn[:-3] for fn in os.listdir(dir_path) if fn.endswith(self.suffix)]
-                local_files.extend([fn for fn in os.listdir(dir_path) if os.path.isdir(os.path.join(dir_path, fn))])
-                check = mod in local_files
-            if check:
-                # Add asnames
-                for i, v in enumerate(imported_mods):
-                    if v == mod:
-                        modules_local.add(modules_all[i])
-        return modules_local, modules_all
-
-    def _get_imports_string(self, module_ast: ast.Module):
-        # Returns import statements together in one string
-        import_visitor = ImportVisitor()
-        import_visitor.visit(module_ast)
-        imports_string = import_visitor.import_string
-        return imports_string
-    
-    def _get_imported_constants(self, modules_all):
-        imported_consts_str = ''
-        for module in modules_all:
-            if type(getattr(self.sourced_module, module)) in self.primitives:
-                imported_consts_str += f'\n{module} = {getattr(self.sourced_module, module)}'
-        return imported_consts_str
-    
-
-    def _get_body_func_nodes(self, node: Union[ast.Module, ast.ClassDef]):
-        func_nodes = [subnode for subnode in node.body if isinstance(subnode, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        return func_nodes
-
-    def _get_body_class_nodes(self, node: Union[ast.Module, ast.ClassDef]):
-        class_nodes = [subnode for subnode in node.body if isinstance(subnode, ast.ClassDef)]
-        return class_nodes
-
-    def _get_body_constants_str(self, node: Union[ast.Module, ast.ClassDef]):
-        constants_string = ''
+    def get_body_variables_str(self, node: Union[ast.Module, ast.ClassDef]):
+        """Handels all the rest body nodes except imports, classes and functions"""
+        variables_string = ''
         decleared_types = ''
-        rest_nodes = [subnode 
-                        for subnode in node.body 
-                        if not isinstance(subnode, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef))]
+        rest_nodes = [
+            subn 
+            for subn in node.body 
+            if not isinstance(subn, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef))
+        ]
+        
         for rest_node in rest_nodes:
-            constants_string += f'\n{ast.unparse(rest_node)}'
-            for subnode in ast.walk(rest_node):
-                if isinstance(subnode, ast.Assign):
-                    if isinstance(subnode.value, ast.Call):
-                        call_name = self._get_function_name(subnode.value.func)
-                        if call_name in self.body_funcs + self.body_classes or call_name in self.modules_local:
-                            for name in subnode.targets:
-                                decleared_types += f'\n{name.id}: {type(getattr(self.sourced_module, name.id))}'
+            variables_string += f'\n{ast.unparse(rest_node)}'
+            # Body Level assignments
+            if isinstance(rest_node, ast.Assign):
+                if isinstance(rest_node.value, ast.Call):
+                    call_name = self.ast_visitor._get_function_name(rest_node.value.func)
+                    if call_name in self.body_func_names + self.body_class_names or call_name in self.modules_local:
+                        for name in rest_node.targets:
+                            decleared_types += f'\n{name.id}: {type(getattr(self.sourced_module, name.id))}'
         if decleared_types != '':
-            final_string = f'{constants_string}\n'\
-                f'Additionally data types for decleared variables whose types are not obvious:{decleared_types}'
+            final_string = f'{variables_string}\n'\
+                f'Additionally data types for body-decleared variables whose types are not obvious:{decleared_types}'
         else:
-            final_string = constants_string
+            final_string = variables_string
         return final_string
 
-    def _get_body_instances(self, module_ast: ast.Module):
-        # Called from ast.Module on body returns dict{instance:class}
-        call_visitor = CallVisitor(self.sourced_module)
-        for node in module_ast.body:
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
-                call_visitor.visit(node)
-        instances_filtered = {key: value 
-                              for key, value in call_visitor.instances.items()
-                              if value in self.body_classes or value.split(".")[0] in self.modules_local}
-        return instances_filtered
+    def get_local_modules(self, modules_all: list) -> list:
+        """Returns list of local modules"""
+        # Imported modules: actual module names
+        imported_mods = [*self.ast_visitor.modules.values()]
+        dir_path = os.path.dirname(self.sourced_module.__file__)
+        # Collect local py files and dirs
+        local_files = [fn for fn in os.listdir(dir_path) 
+                       if os.path.isdir(os.path.join(dir_path, fn)) or fn.endswith(".py")]
+        # Check if imported modules are local
+        modules_local = []
+        for mod in imported_mods:
+            if mod.startswith(".") or mod.split(".")[0] in local_files:
+                for i, v in enumerate(imported_mods):
+                    if v == mod:
+                        # Collect modules with asnames
+                        modules_local.append(modules_all[i])
+        return modules_local
     
-    def _get_relevant_calls(self, node: ast.FunctionDef, method=False, class_name=None):
-        # Returns relevant function calls in an enclosed enviornment
-        call_visitor = CallVisitor(self.sourced_module)
-        call_visitor.visit(node)
-        call_names = list(call_visitor.func_names)
+    def get_imported_constants_str(self, modules_all: list) -> str:
+        imported_consts_str = ''
+        for module in modules_all:
+            traced_module = self._trace_module(module, self.sourced_module)
+            if type(getattr(traced_module, module.split(".")[-1])) in self.primitives:
+                imported_consts_str += f'\n{module} = {getattr(traced_module, module.split(".")[-1])}'
+        return imported_consts_str
+    
+    def retrieve_func_node(self, obj_name, method=None):
+        """Returns function node given a function name"""
+        if method is None:
+            node = self.body_func_nodes[self.body_func_names.index(obj_name)]
+        else:
+            class_node = self.retrieve_class_node(obj_name)
+            method_nodes = [
+                subn
+                for subn in class_node.body 
+                if isinstance(subn, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            method_names = [method.name for method in method_nodes]
+            node = method_nodes[method_names.index(method)]
+        return node
+
+    def retrieve_class_node(self, obj_name):
+        """Returns class node given a class name"""
+        return self.body_class_nodes[self.body_class_names.index(obj_name)]
+
+    def  get_local_calls(
+            self,
+            node: Union[ast.FunctionDef, ast.AsyncFunctionDef],
+            method=False,
+            class_name=None
+        ) -> set:
+        # Restore the visitor
+        self.ast_visitor.func_names = set()
+        self.ast_visitor.instances = {}
+        self.ast_visitor.visit(node)
+        call_names: list[str] = list(self.ast_visitor.func_names)
         # Enclosed env has priority over global
         instances = self.body_instances.copy()
-        instances.update(call_visitor.instances)
-        
+        instances.update(self.ast_visitor.instances)
+
         # Swap instance name with associated class name in calls
         for i, call in enumerate(call_names):
             splits = call.split('.')
             if len(splits) > 1:
                 if splits[0] in [*instances.keys()]:
                     splits[0] = instances[splits[0]]
-                    call_names[i] = "".join(splits)
                 if method:
                     indicator = node.args.args[0].arg
                     if splits[0] == indicator:
                         splits[0] = class_name
-                        call_names[i] = "".join(splits)
-        
-        local_classes = list(self.modules_local) + self.body_classes
-        local_functions = self.body_funcs + list(self.modules_local)
-        local_calls = [name for name in call_names if name in local_functions or name.split(".")[0] in local_classes]
-        local_calls = set(local_calls)
-        return local_calls
+                call_names[i] = '.'.join(splits)
+        local_classes = list(self.modules_local) + self.body_class_names
+        local_functions = list(self.modules_local) + self.body_func_names
+        local_calls = [
+            nm for nm in call_names
+            if nm in local_functions or nm.split(".")[0] in local_classes
+        ]
+        return set(local_calls)
 
-    def _get_function_name(self, node):
-        if isinstance(node, ast.Name):
-            return node.id
-        elif isinstance(node, ast.Attribute):
-            return self._get_function_name(node.value) + '.' + node.attr
-        
-    def _trace_call(self, call_name, sourced_module):
+    def get_local_defs_str(self, local_calls: set, omit: str=None):
+        local_defs = ''
+        for call in local_calls:
+            if self._is_method(call, self.sourced_module):
+                # If call is a class method call
+                local_defs += f'\nMethod Definition for {call}:\n{self._trace_call(call, self.sourced_module)}'
+                if self._has_init(call, self.sourced_module, omit=omit):
+                    # If class has init provide additional info
+                    local_defs += f"\n'Associated class __init__ definition:\n{self._get_init(call, self.sourced_module)}"
+                else:
+                    # If it is simple local function call
+                    local_defs += f'\nDefiniton for {call}:\n{self._trace_call(call, self.sourced_module)}'
+        return local_defs
+
+    def _is_method(self, call_name, sourced_module) -> bool:
+        """Helper Function checks if a call is a class method"""
         submodules = call_name.split('.')
         for submodule in submodules:
-            sourced_module = getattr(sourced_module, submodule)
-        return inspect.getsource(sourced_module)
+            try:
+                sourced_module = getattr(sourced_module, submodule)
+            except:
+                return False
+        return inspect.ismethod(sourced_module)
     
-    def _has_init(self, call_name, sourced_module, omit=None):
+    def _has_init(self, call_name, sourced_module, omit=None) -> bool:
+        """Helper Function checks if a class has an __init__ method"""
         submodules = call_name.split('.')
         class_name = submodules[0]
         if omit is not None:
             if class_name == omit:
                 return False
-        return hasattr(getattr(sourced_module, class_name), '__init__')
+        return inspect.isfunction(getattr(getattr(sourced_module, class_name), '__init__'))
     
     def _get_init(self, call_name, sourced_module):
+        """Helper Function returns __init__ method definition of a class"""
         submodules = call_name.split('.')
         class_def = getattr(sourced_module, submodules[0])
         return inspect.getsource(getattr(class_def, '__init__'))
 
-    def _is_method(self, call_name, sourced_module):
+    def _trace_module(self, module_name, sourced_module) -> ModuleType:
+        """Helper Function traces a module recursively until reaching the module itself"""
+        submodules = module_name.split('.')
+        for submodule in submodules[:-1]:
+            sourced_module = getattr(sourced_module, submodule)
+        return sourced_module
+    
+    def _trace_call(self, call_name, sourced_module) -> str:
+        """Helper Function traces a call recursively until reaching the function itself"""
         submodules = call_name.split('.')
         for submodule in submodules:
             sourced_module = getattr(sourced_module, submodule)
-        return inspect.ismethod(sourced_module)
+        return inspect.getsource(sourced_module)
+
+
+class PythonAdapter(BaseAdapter):
+    suffix = ".py"
+    def __init__(self, module: str, testing_framework: str="unittest"):
+        super().__init__(language="python", testing_framework=testing_framework)
+        
+        # Id attributes
+        self.module = module
+        if module.startswith("/"): 
+            self.mod_name = module[1:].replace('/', '.')[:-3]
+        else:
+            self.mod_name = module[:-3].replace('/', '.')
+        print(self.mod_name)
+        self.suffix = self.__class__.suffix
+
+        # PromptPreparer
+        self.sourced_module = self._source_module(module)
+        self.prompt_preparer = PromptPreparer(self.sourced_module)
+
+        # # Start-up
+        # self.source_code = inspect.getsource(self.sourced_module)
+        # self.syntax_tree = self._build_ast(self.source_code)
+    
+        # self.modules_local, self.modules_all = self._get_local_modules(self.syntax_tree)
+        
+        # # primitives for identifying constants
+        # self.primitives = (str, int, float, complex, list, tuple,
+        #               range, dict, set, frozenset, bool, bytes, bytearray, memoryview, type(None))
+        
+        # # Body
+        # self.imports_string = self._get_imports_string(self.syntax_tree)
+        # self.imported_constants_str = self._get_imported_constants(self.modules_all)
+        # self.body_class_nodes = self._get_body_class_nodes(self.syntax_tree)
+        # self.body_func_nodes = self._get_body_func_nodes(self.syntax_tree)
+        # self.body_funcs = [node.name for node in self.body_func_nodes]
+        # self.body_classes = [node.name for node in self.body_class_nodes]
+        # self.variables_string = self._get_body_variables_str(self.syntax_tree)
+        # self.body_instances = self._get_body_instances(self.syntax_tree)
+
+
+    def retrieve_func_defs(self):
+        """Returns list of function names avaliable in module/script Body"""
+        return self.prompt_preparer.body_func_names
+
+    def retrieve_class_defs(self):
+        """Returns list of class names avaliable in module/script Body"""
+        return self.prompt_preparer.body_class_names
+    
+    def retrieve_class_methods(self, class_name: str):
+        """Returns list of methods of a class given a class name"""
+        class_node = self.prompt_preparer.body_class_nodes[self.prompt_preparer.body_class_names.index(class_name)]
+        method_nodes = [subn for subn in class_node.body if isinstance(subn, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        method_names = [method.name for method in method_nodes]
+        return method_names
+    
+    def retrieve_module_source(self) -> str:
+        """Returns source code of a module"""
+        return inspect.getsource(self.sourced_module)
+
+    def retrieve_func_source(self, func_name: str) -> str:
+        """Returns source code of a function definiton given a function name"""
+        return inspect.getsource(getattr(self.sourced_module, func_name))
+    
+    def retrieve_class_source(self, class_name: str) -> str:
+        """Returns source code of a class definition given a class name"""
+        return inspect.getsource(getattr(self.sourced_module, class_name))
+    
+    def retrieve_classmethod_source(self, class_name: str, method_name: str) -> str:
+        """Returns source code of a method definition given a class name and method name"""
+        return inspect.getsource(getattr(getattr(self.sourced_module, class_name), method_name))
+
+    def prepare_prompt(self, obj_name: str, method_name: str=None):
+        if obj_name not in self.prompt_preparer.body_func_names + self.prompt_preparer.body_class_names:
+            raise ValueError(f"There is no class or function definition called: {obj_name} in the {self.module}")
+        
+        # Two cases: Function or Class
+        if obj_name in self.prompt_preparer.body_func_names and method_name is None:
+            obj_type = "Function"
+            obj_desc = "Function Definition"
+            node = self.prompt_preparer.retrieve_func_node(obj_name)
+            source_code = self.retrieve_func_source(obj_name)
+            relevant_calls = self.prompt_preparer.get_local_calls(node)
+            local_call_defs = self.prompt_preparer.get_local_defs_str(relevant_calls)
+
+            info_sheet = generate_python_info_sheet(
+                obj_type = obj_type,
+                module_name=self.mod_name,
+                imports=self.prompt_preparer.imports_string,
+                constants=self.prompt_preparer.imported_constants_str,
+                variables=self.prompt_preparer.variables_string,
+                local_call_defs=local_call_defs
+            )
+        
+        elif obj_name in self.prompt_preparer.body_class_names and method_name is not None:
+            obj_type = "Class"
+            obj_desc = f"Method Definition of a class called: {obj_name}"
+            class_node = self.prompt_preparer.retrieve_class_node(obj_name)
+            method_node = self.prompt_preparer.retrieve_func_node(obj_name, method_name)
+            source_code = self.retrieve_classmethod_source(obj_name, method_name)
+            
+            if self.prompt_preparer._has_init(obj_name, self.sourced_module, omit=method_name):
+                init = self.retrieve_classmethod_source(obj_name, "__init__")
+            else:
+                init = ''
+
+            class_attributes = self.prompt_preparer.get_body_variables_str(class_node)
+            relevant_calls = self.prompt_preparer.get_local_calls(method_node, method=True, class_name=obj_name)
+            local_call_defs = self.prompt_preparer.get_local_defs_str(relevant_calls, omit=method_name)
+            info_sheet = generate_python_info_sheet(
+                obj_type = obj_type,
+                module_name=self.mod_name,
+                imports=self.prompt_preparer.imports_string,
+                constants=self.prompt_preparer.imported_constants_str,
+                variables=self.prompt_preparer.variables_string,
+                local_call_defs=local_call_defs,
+                class_name=obj_name,
+                init=init,
+                class_attributes=class_attributes
+            )
+
+        # Prepare system PROMPT
+        additional_info = "Make sure that the script is only executed from the __main__.\n" \
+            f"Your response should start with: from {self.mod_name} import {obj_name}"
+        
+        system_prompt = INITIAL_SYSTEM_PROMPT.format(
+            language=self.language,
+            framework=self.framework,
+            obj_desc= obj_desc,
+            additional_info=additional_info
+        )
+
+        # Prepare system PROMPT
+        user_prompt = INITIAL_USER_PROMPT.format(
+            obj_type= "Function "if obj_type == "Function" else "Method",
+            source_code=source_code,
+            info_sheet=info_sheet
+        )
+
+        messages = [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': user_prompt}
+        ]
+        return messages
+    
+    
+    def run_tests_with_coverage(self, test_source: str):
+        """
+        Takes a string of code generated by ChatGPT and runs it for testing while tracking code coverage.
+
+        Parameters:
+            test_source (str): The response string returned by the OpenAI API.
+
+        Returns:
+            dict: A dictionary containing specific key-value pairs.\n
+                - 'tests_ran_n': The number of tests that ran (list[int]).\n
+                - 'errors': A list of tuples containing (test_id, traceback_message)
+                            for tests with errors (list[tuple(str, str)]).\n
+                - 'failures': A list of tuples containing (test_id, traceback_message)
+                            for tests with failures (list[tuple(str, str)]).\n
+                - 'executed_lines': A list of executed line numbers [based on the entire module or script] (list[int]).\n
+                - 'missing_lines': A list of missing line numbers [based on the entire module or script] (list[int]).
+
+        Exception:
+            If there is a problem compiling the code provided by ChatGPT,
+            an exception message string is returned for reprompting purposes.
+        """
+
+
+        # Before We start tracking coverage we unload the module so the definiton lines are tracked correctly
+        if self.mod_name in sys.modules:
+            del sys.modules[self.mod_name]
+        # Create Temp file for json report
+        temp_json = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".json")
+
+        # Start Recording Coverage
+        print("source:\n" + test_source)
+        
+        print("Starting Coverage")
+        cov = coverage.Coverage(source=[self.mod_name], messages=True)
+        cov.start()
+        result = self._run_tests(test_source)
+        cov.stop()
+        test_metadata = dict()
+        print("Running Tests completed...")
+        if isinstance(result, str):
+            # Return exception message
+            test_metadata['compile_error'] = result
+            return result
+        try:
+            cov.json_report(outfile=temp_json.name)
+            with open(temp_json.name) as file:
+                json_report = json.load(file)
+            temp_json.close()
+            os.remove(temp_json.name)
+ 
+            # Prepare metadata
+            test_metadata['tests_ran_n'] = result.testsRun
+            test_metadata['errors'] = result.errors
+            test_metadata["failures"] = result.failures
+            fn = [*json_report["files"].keys()][0]
+            test_metadata['executed_lines'] = json_report["files"][fn]['executed_lines']
+            test_metadata['missing_lines'] = json_report["files"][fn]['missing_lines']
+            test_metadata['compile_error'] = None
+        except:
+            test_metadata['compile_error'] = f"Make sure to import the definition from {self.mod_name} module. "\
+                f"Include 'from {self.mod_name} import *' in your response."
+        return test_metadata
+
+    def _run_tests(self, test_source):
+        """Helper Function for run_tests_with_coverage. Runs tests and returns results."""
+        # Setup Temporary file for Test code
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=self.suffix) as temp_file:
+            temp_file.write(test_source)
+            temp_fn = temp_file.name
+        try:
+            # Try Loading Temp file as module: Checks if provided code by ChatGPT is a valid module/script
+            spec = importlib.util.spec_from_file_location(os.path.basename(temp_fn)[:-3], temp_fn)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            print(module.__file__)
+        except Exception as e:
+            return traceback.format_exception_only(type(e), e)[-1]
+        finally:
+            # Delete temp file
+            os.remove(temp_fn)
+
+        # Set-up Tests
+        test_loader = unittest.TestLoader()
+        test_suite = test_loader.loadTestsFromModule(module=module)
+        runner = unittest.TextTestRunner(verbosity=2, warnings=False)
+        # Run Tests
+        result = runner.run(test_suite)
+        return result
+
+
+    def _source_module(self, module:str):
+        if not module.endswith(self.suffix):
+            raise Exception(f"Module should be a python module with a {self.suffix} extension")
+        try:
+            sourced_module = importlib.import_module(self.mod_name)
+        except Exception:
+            raise Exception(f"Error while importing module: {module}")
+        return sourced_module
+        
+    # def _build_ast(self, source_code:str):
+    #     return ast.parse(source_code)
+    
+    # def _get_local_modules(self, module_ast: ast.Module):
+    #     # Identifies local modules, returns list of strings (module asnames)
+    #     import_visitor = ImportVisitor()
+    #     import_visitor.visit(module_ast)
+    #     # Actual modules
+    #     imported_mods = [*import_visitor.modules.values()]
+    #     # Asnames
+    #     modules_all= [*import_visitor.modules.keys()]
+    #     modules_local = set()
+    #     dir_path = os.path.dirname(self.module)
+    #     if dir_path == '':
+    #         dir_path = '.'
+    #     # Collect local py files and dirs
+    #     local_files = [] 
+    #     for fn in os.listdir(dir_path):
+    #         if os.path.isdir(os.path.join(dir_path, fn)):
+    #             local_files.append(fn)
+    #         else:
+    #             if fn.endswith(self.suffix):
+    #                 local_files.append(fn[:-3])
+    #     # Check if imported modules are local
+    #     for mod in imported_mods:
+    #         if mod.split(".")[0] in local_files:
+    #             for i, v in enumerate(imported_mods):
+    #                 if v == mod:
+    #                     # Collect modules with asnames
+    #                     modules_local.add(modules_all[i])
+    #     return modules_local, modules_all
+
+    # def _get_imports_string(self, module_ast: ast.Module):
+    #     # Returns import statements together in one string
+    #     import_visitor = ImportVisitor()
+    #     import_visitor.visit(module_ast)
+    #     imports_string = import_visitor.import_string
+    #     return imports_string
+    
+    # def _get_imported_constants(self, modules_all):
+    #     imported_consts_str = ''
+    #     for module in modules_all:
+    #         traced_module = self._trace_module(module, self.sourced_module)
+    #         if type(getattr(traced_module, module.split(".")[-1])) in self.primitives:
+    #             imported_consts_str += f'\n{module} = {getattr(traced_module, module.split(".")[-1])}'
+    #     return imported_consts_str
     
 
+    # def _get_body_func_nodes(self, node: Union[ast.Module, ast.ClassDef]):
+    #     func_nodes = [subnode for subnode in node.body if isinstance(subnode, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    #     return func_nodes
+
+    # def _get_body_class_nodes(self, node: Union[ast.Module, ast.ClassDef]):
+    #     class_nodes = [subnode for subnode in node.body if isinstance(subnode, ast.ClassDef)]
+    #     return class_nodes
+
+    # def _get_body_variables_str(self, node: Union[ast.Module, ast.ClassDef]):
+    #     variables_string = ''
+    #     decleared_types = ''
+    #     rest_nodes = [subnode 
+    #                     for subnode in node.body 
+    #                     if not isinstance(subnode, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.ClassDef))]
         
+    #     for rest_node in rest_nodes:
+    #         variables_string += f'\n{ast.unparse(rest_node)}'
+    #         # Body Level assignments
+    #         if isinstance(rest_node, ast.Assign):
+    #             if isinstance(rest_node.value, ast.Call):
+    #                 call_name = self._get_function_name(rest_node.value.func)
+    #                 if call_name in self.body_funcs + self.body_classes or call_name in self.modules_local:
+    #                     for name in rest_node.targets:
+    #                         decleared_types += f'\n{name.id}: {type(getattr(self.sourced_module, name.id))}'
+    #     if decleared_types != '':
+    #         final_string = f'{variables_string}\n'\
+    #             f'Additionally data types for body-decleared variables whose types are not obvious:{decleared_types}'
+    #     else:
+    #         final_string = variables_string
+    #     return final_string
 
-
-
+    # def _get_body_instances(self, module_ast: ast.Module):
+    #     # Called from ast.Module on body returns dict{instance:class}
+    #     call_visitor = CallVisitor(self.sourced_module)
+    #     for node in module_ast.body:
+    #         if isinstance(node, (ast.Assign, ast.AnnAssign)):
+    #             call_visitor.visit(node)
+    #     instances_filtered = {key: value 
+    #                           for key, value in call_visitor.instances.items()
+    #                           if value in self.body_classes or value.split(".")[0] in self.modules_local}
+    #     return instances_filtered
+    
+    # def _get_relevant_calls(self, node: ast.FunctionDef, method=False, class_name=None):
+    #     # Returns relevant function calls in an enclosed enviornment
+    #     call_visitor = CallVisitor(self.sourced_module)
+    #     call_visitor.visit(node)
+    #     call_names = list(call_visitor.func_names)
+    #     # Enclosed env has priority over global
+    #     instances = self.body_instances.copy()
+    #     instances.update(call_visitor.instances)
         
+    #     # Swap instance name with associated class name in calls
+    #     for i, call in enumerate(call_names):
+    #         splits = call.split('.')
+    #         if len(splits) > 1:
+    #             if splits[0] in [*instances.keys()]:
+    #                 splits[0] = instances[splits[0]]
+    #                 call_names[i] = "".join(splits)
+    #             if method:
+    #                 indicator = node.args.args[0].arg
+    #                 if splits[0] == indicator:
+    #                     splits[0] = class_name
+    #                     call_names[i] = "".join(splits)
+        
+    #     local_classes = list(self.modules_local) + self.body_classes
+    #     local_functions = self.body_funcs + list(self.modules_local)
+    #     local_calls = [name for name in call_names if name in local_functions or name.split(".")[0] in local_classes]
+    #     local_calls = set(local_calls)
+    #     return local_calls
+
+    # def _get_local_defs_str(self, local_calls: set, omit: str):
+    #     local_defs = ''
+    #     for call in local_calls:
+    #         if self._is_method(call, self.sourced_module):
+    #             local_defs += f'\nMethod Definition for {call}:\n{self._trace_call(call, self.sourced_module)}'
+    #             if self._has_init(call, self.sourced_module, omit=omit):
+    #                 local_defs += f"\n'Associated class __init__ definition:\n{self._get_init(call, self.sourced_module)}"
+    #             else:
+    #                 local_defs += f'\nDefiniton for {call}:\n{self._trace_call(call, self.sourced_module)}'
+    #     return local_defs
+
+    # def _get_function_name(self, node):
+    #     if isinstance(node, ast.Name):
+    #         return node.id
+    #     elif isinstance(node, ast.Attribute):
+    #         return self._get_function_name(node.value) + '.' + node.attr
+        
+    # def _trace_call(self, call_name, sourced_module):
+    #     submodules = call_name.split('.')
+    #     for submodule in submodules:
+    #         sourced_module = getattr(sourced_module, submodule)
+    #     return inspect.getsource(sourced_module)
+
+    # def _trace_module(self, module_name, sourced_module):
+    #     submodules = module_name.split('.')
+    #     for submodule in submodules[:-1]:
+    #         sourced_module = getattr(sourced_module, submodule)
+    #     return sourced_module
+    
+    # def _has_init(self, call_name, sourced_module, omit=None):
+    #     submodules = call_name.split('.')
+    #     class_name = submodules[0]
+    #     if omit is not None:
+    #         if class_name == omit:
+    #             return False
+    #     return hasattr(getattr(sourced_module, class_name), '__init__')
+    
+    # def _get_init(self, call_name, sourced_module):
+    #     submodules = call_name.split('.')
+    #     class_def = getattr(sourced_module, submodules[0])
+    #     return inspect.getsource(getattr(class_def, '__init__'))
+
+    # def _is_method(self, call_name, sourced_module):
+    #     submodules = call_name.split('.')
+    #     for submodule in submodules:
+    #         sourced_module = getattr(sourced_module, submodule)
+    #     return inspect.ismethod(sourced_module)
+    
+
+
+
+
+
+
+#     def retrieve_func_defs(self):
+#         """Returns list of function names avaliable in module/script Body"""
+#         return self.body_funcs
+
+#     def retrieve_class_defs(self):
+#         """Returns list of class names avaliable in module/script Body"""
+#         return self.body_classes
+    
+#     def retrieve_class_methods(self, class_name: str):
+#         """Returns list of methods of a class given a class name"""
+#         class_node = self.body_class_nodes[self.body_classes.index(class_name)]
+#         method_nodes = self._get_body_func_nodes(class_node)
+#         method_names = [method.name for method in method_nodes]
+#         return method_names
+    
+#     def retrieve_module_source(self) -> str:
+#         """Returns source code of a module"""
+#         return self.source_code
+
+#     def retrieve_func_source(self, func_name: str):
+#         """Returns source code of a function definiton given a function name"""
+#         func_source = inspect.getsource(getattr(self.sourced_module, func_name))
+#         return func_source
+    
+#     def retrieve_class_source(self, class_name: str):
+#         """Returns source code of a class definition given a class name"""
+#         class_source = inspect.getsource(getattr(self.sourced_module, class_name))
+#         return class_source
+    
+#     def retrieve_classmethod_source(self, class_name: str, method_name: str):
+#         """Returns source code of a method definition given a class name and method name"""
+#         method_source = inspect.getsource(getattr(getattr(self.sourced_module, class_name), method_name))
+#         return method_source
+    
+
+
+#     # Import Visitor
+# class ImportVisitor(ast.NodeVisitor):
+#     def __init__(self):
+#         # modules is a dict of asname:module pair
+#         self.modules = dict()
+#         self.import_string = ''
+
+#     def visit_Import(self, node):
+#         self.import_string += f"\n{ast.unparse(node)}"
+#         for alias in node.names:
+#             if alias.asname:
+#                 # Alias import
+#                 self.modules[alias.asname] = alias.name
+#             else:
+#                 # Simple import
+#                 self.modules[alias.name] = alias.name
+#         self.generic_visit(node)
+
+#     def visit_ImportFrom(self, node):
+#         module = node.module
+#         if module:
+#             self.import_string += f"\n{ast.unparse(node)}" 
+#             for alias in node.names:
+#                 # From import with alias
+#                 if alias.asname:
+#                     self.modules[alias.asname] = module
+#                 else:
+#                     # Simple from import
+#                     if alias.name != '*':
+#                         self.modules[alias.name] = module
+#                     else:
+#                         # dynamically import module
+#                         module_asterisked = importlib.import_module(module)
+#                         # add all names to the namespace except imported modules
+#                         module_asterisked_imports = inspect.getmembers(module_asterisked, inspect.ismodule)
+#                         module_asterisked_import_names = [name for name, _ in module_asterisked_imports]
+#                         self.modules.update(
+#                             {name: module
+#                              for name in dir(module_asterisked) 
+#                              if not name.startswith('_') and name not in module_asterisked_import_names}
+#                         ) 
+#         else:
+#             self.visit_Import(node)
+#         self.generic_visit(node)
+
+    
+# # Call visitor
+# class CallVisitor(ast.NodeVisitor):
+#     def __init__(self, sourced_module):
+#         self.sourced_module = sourced_module
+#         self.func_names = set()
+#         self.instances = {}
+#     def get_function_name(self, node):
+#         if isinstance(node, ast.Name):
+#             return node.id
+#         elif isinstance(node, ast.Attribute):
+#             print(ast.dump(node, indent=3))
+#             return self.get_function_name(node.value) + '.' + node.attr
+#         elif isinstance(node, ast.Call):
+#             print(node.func)
+#             return self.get_function_name(node.func)
+    
+#     def visit_Call(self, node):
+#         fun_name = self.get_function_name(node.func)
+#         if fun_name:
+#             self.func_names.add(fun_name)                
+#         self.generic_visit(node)
+    
+#     def visit_Assign(self, node):
+#         for target in node.targets:
+#             if isinstance(target, ast.Tuple):
+#                 for target_name, value in zip(target.dims, node.value.dims):
+#                     if isinstance(value, ast.Call):
+#                         func_name = self.get_function_name(value.func)
+#                         if self._check_func_name(func_name, self.sourced_module):
+#                             self.instances[target_name.id] = func_name
+            
+#             elif isinstance(target, ast.Name):
+#                 if isinstance(node.value, ast.Call):
+#                     func_name = self.get_function_name(node.value.func)
+#                     if self._check_func_name(func_name, self.sourced_module):
+#                         self.instances[target.id] = func_name
+    
+#     def visit_AnnAssign(self, node):
+#         if isinstance(node.value, ast.Call):
+#             func_name = self.get_function_name(node.value.func)
+#             if self._check_func_name(func_name, self.sourced_module):
+#                 self.instances[node.traget.id] = func_name
+#         if node.value is None:
+#             # Case of annotations
+#             if isinstance(node.annotation, ast.Name):
+#                 class_name = self.get_function_name(node.annotation)
+#             if isinstance(node.annotation, ast.Subscript):
+#                 class_name = self.get_function_name(node.annotation.slice)
+#             if self._check_func_name(class_name, self.sourced_module):
+#                 self.instances[node.target.id] = class_name
+    
+#     def _check_func_name(self, func_name, sourced_module):
+#         submodules = func_name.split('.')
+#         if func_name in dir(sourced_module) or submodules[0] in dir(sourced_module):
+#             if len(submodules) != 1:
+#                 func_name = submodules[-1]
+#                 for submodule in submodules[:-1]:
+#                     sourced_module = getattr(sourced_module, submodule)
+#             if inspect.isclass(getattr(sourced_module, func_name)):
+#                 return True
+#         return False
+

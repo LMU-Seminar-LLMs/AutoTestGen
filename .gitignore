@@ -6,9 +6,11 @@ __pycache__/
 # C extensions
 *.so
 
+### Temporary
 # Testing
 test/
-test*.py
+test[1-9]*.py
+####
 
 # Pickels
 *.pkl
