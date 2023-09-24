@@ -11,7 +11,10 @@ setup(
     long_description=long_description,
     packages=find_packages(exclude="notebooks"),
     # Needed for dependencies
-    install_requires=[],
+    install_requires=[
+        "openai",
+        "tiktoken"
+    ],
     version='0.1',
     license='MIT',
     description='Automatic Unit Test generation using LLM',
