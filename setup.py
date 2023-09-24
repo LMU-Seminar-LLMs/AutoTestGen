@@ -12,7 +12,7 @@ setup(
     author_email='giorginozadze23@yahoo.com',
     license='MIT',
     url='https://github.com/LMU-Seminar-LLMs/AutoTestGen',
-    packages=find_packages(exclude=["demo", "AutoTestGen.tests.*"]),
+    packages=find_packages(exclude=['demo', 'demo.*', 'AutoTestGen.tests', 'AutoTestGen.tests.*']),
     # Entry point
     entry_points={
         "console_scripts": [
