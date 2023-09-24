@@ -54,16 +54,18 @@ After selecting the project directory, **Main Frame** will be displayed.
 3. Select function/method to test in the Object Tree. [See Object Tree](#object-tree)
 4. Configure the test generation process. [See Test Configuration](#test-configuration)
 5. Push the *Generate Tests* button to start the test generation process. [See Test Generation](#test-generation)
-
+6. Observe results in the Tests Tree. [See Tests Tree](#tests-tree)
 
 ### Authentication
 Authentication via the menu bar is required to use the OpenAI API. It opens the following window:
 [![Authentication Window](./assets/auth.png)](https://beta.openai.com/docs/developer-quickstart/your-api-keys)
+
 User has an option to authenticate manually using the entries or using *.env* file containing the API key. For more information about .env authentication see the question mark in the right lower corner of the window.
 
 ### File Tree
 File Tree displays all the files having the selected language extension in the project directory. It additionally ignores all the files listed in the .gitignore file if it exists.  User can select the file for testing by *double-clicking* on it.
 ![File Tree](./assets/filetree.png)
+
 ***Additional features:***
 - Right-click menu:
     - *Open* - opens the file in the default editor. It can be used for quick fixes of the code before generating the tests.
@@ -72,6 +74,7 @@ File Tree displays all the files having the selected language extension in the p
 ### Object Tree
 Object Tree displays all the functions/methods in the selected file. Methods are displayed as children nodes of the class they belong to. User simply needs to select desired object before clicking the *Generate Tests* button.
 ![Object Tree](./assets/objecttree.png)
+
 ***Additional features:***
 - Right-click menu:
     - *Open Coverage* - opens the coverage report accumulated over all avaliable tests in the database for the selected object.
@@ -87,8 +90,8 @@ Test Configuration allows the user to configure the test generation process.
     - *max_iter* - maximum number of iterations to run the pipeline - automatically reprompt the model in case the generated tests cannot be compiled or contain errors. *Default: 3*
 
 ### Test Generation
-Both the prompts and the generated tests will be displayed in the *Chat Window*. The user can continue communicating with the API through the *Chat Entry* as in normal chat. There is also an option to click *Generate Tests* button again for another object to perform [**few-shot learning**](https://help.openai.com/en/articles/6654000-best-practices-for-prompt-engineering-with-openai-api).
-All the messages in the *chat window* are send together with the new message to the API until the chat is cleared. [See Other Features](#other-features)
+Both the prompts and the generated tests will be displayed in the *Chat Window*. The user can continue communicating with the API through the *Chat Entry* as in normal chat. There is also an option to click *Generate Tests* button again for another object to perform [**few-shot learning**](https://help.openai.com/en/articles/6654000-best-practices-for-prompt-engineering-with-openai-api).  
+All the messages in the *chat window* are send together with the new message to the API until the chat is cleared. [See Other Features](#other-features)  
 All succesfully generated tests will be saved in the database and can be viewed in the *Tests Tree*. [See Tests Tree](#tests-tree)
 
 ### Tests Tree
