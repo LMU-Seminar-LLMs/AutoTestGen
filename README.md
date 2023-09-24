@@ -3,7 +3,7 @@
 [![build status](https://github.com/LMU-Seminar-LLMs/AutoTestGen/actions/workflows/main.yml/badge.svg)](https://github.com/LMU-Seminar-LLMs/AutoTestGen/actions/workflows/main.yml)
 [![LMU: Munich](https://img.shields.io/badge/LMU-Munich-009440.svg)](https://www.en.statistik.uni-muenchen.de/index.html)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![codecov](https://codecov.io/gh/Noza23/AutoTestGen/graph/badge.svg?token=Dv77ecKOmO)](https://codecov.io/gh/Noza23/AutoTestGen)
+[![codecov](https://codecov.io/gh/Noza23/AutoTestGen/graph/badge.svg?token=Dv77ecKOmO)](https://codecov.io/gh/Noza23/AutoTestGen/tree/master)
 
 ## Description
 
