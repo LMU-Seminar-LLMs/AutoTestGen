@@ -111,7 +111,10 @@ class PythonAdapter(BaseAdapter):
             test_lines.insert(0, import_string)
 
         # Making sure script is only executed when ran from main.
-        if not "if __name__ == '__main__':" in test_lines:
+        if (
+            not "if __name__ == '__main__':" in test_lines
+            and not 'if __name__ == "__main__":' in test_lines
+        ):
             if "unittest.main()" in test_lines:
                 test_lines.remove("unittest.main()")
             test_lines.append("if __name__ == '__main__':")
@@ -365,7 +368,10 @@ class AstVisitor(ast.NodeVisitor):
                 if isinstance(node.value, ast.Call):
                     func_name = self._get_function_name(node.value.func)
                     if self._is_class(func_name, self.sourced_module):
-                        self.instances[target.id] = func_name 
+                        self.instances[target.id] = func_name
+                    else:
+                        self.func_names.add(func_name)
+                
             elif isinstance(target, ast.Tuple):
                 # Tuple assignment with multiple targets
                 for target_name, value in zip(target.dims, node.value.dims):
@@ -373,6 +379,8 @@ class AstVisitor(ast.NodeVisitor):
                         func_name = self._get_function_name(value.func)
                         if self._is_class(func_name, self.sourced_module):
                             self.instances[target_name.id] = func_name
+                        else:
+                            self.func_names.add(func_name)
     
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         """
@@ -405,8 +413,8 @@ class AstVisitor(ast.NodeVisitor):
                 func_name = submodules[-1]
                 for submodule in submodules[:-1]:
                     sourced_module = getattr(sourced_module, submodule)
-                if sourced_module is not None:
-                    return inspect.isclass(getattr(sourced_module, func_name))
+            if sourced_module is not None:
+                return inspect.isclass(getattr(sourced_module, func_name))
         return False
 
     def _get_function_name(self, node: ast.expr) -> str:
@@ -729,12 +737,17 @@ class CodeAnalyser:
     def _is_method(self, call_name: str, sourced_module: ModuleType) -> bool:
         """Helper Function checks if a call is a class method"""
         submodules = call_name.split('.')
-        for submodule in submodules:
+        for submodule in submodules[:-1]:
             try:
                 sourced_module = getattr(sourced_module, submodule)
             except:
                 return False
-        return inspect.ismethod(sourced_module)
+        if (
+            inspect.isclass(sourced_module)
+            and callable(getattr(sourced_module, submodules[-1]))
+        ):
+            return True
+        return False
     
     def _has_init(
             self,
