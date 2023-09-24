@@ -237,7 +237,7 @@ class ChatFrame:
         self.chat_frame.pack(fill="both", side="left", padx=10, pady=5, expand=True)
         self.chat_frame.configure(borderwidth=4, relief="groove")
         # Add Chat History
-        self.chat_history = tk.Text(self.chat_frame, state=tk.DISABLED, bg="#B6CEB7")
+        self.chat_history = SelectableText(self.chat_frame, state=tk.DISABLED, bg="#B6CEB7")
         self.chat_history.pack(fill="both", expand=True)
         self.chat_history.tag_configure("User", foreground="black")
         self.chat_history.tag_configure("API", foreground="blue")
@@ -280,9 +280,27 @@ class ChatFrame:
             return
         if text:
             self.chat_history.config(state=tk.NORMAL)
-            self.chat_history.insert(tk.END, f"{tag}:\n{text}\n")
+            self.chat_history.insert(tk.END, f"{tag}:\n{text}\n", tag)
             self.chat_history.config(state=tk.DISABLED)
             self.chat_entry.delete(0, tk.END)
+
+
+
+class SelectableText(tk.Text):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Allow clicking to focus
+        self.bind("<Button-1>", self.delayed_disable)
+
+    def delayed_disable(self, event):
+        self.config(state=tk.NORMAL)
+        self.after(10, self.disable)
+        
+
+    def disable(self):
+        self.config(state=tk.DISABLED)
+
+
 
 class UtilsFrame:
     def __init__(self, app_frame: ttk.Frame, chat_frame: ChatFrame, repo_dir: str, suffix: str, language: str):
@@ -305,7 +323,7 @@ class UtilsFrame:
         
         # Add Right Click Menu
         menu = tk.Menu(self.utils_frame, tearoff=0)
-        menu.add_command(label="Open", command=self.open_selected_item)
+        menu.add_command(label="Open", command=lambda event=None: self.open_selected_item())
         self.file_tree.bind("<Button-2>", lambda event: menu.post(event.x_root, event.y_root))
         menu.add_command(label="Select for Testing", command=lambda event=None: self.select_for_testing())
     
@@ -327,15 +345,16 @@ class UtilsFrame:
         selected_item = self.file_tree.focus()
         if selected_item:
             item_path = self.file_tree.item(selected_item)["tags"][0]
-            if os.path.isfile(item_path):
-                self._open_file(item_path)
+            file = os.path.join(self.repo_dir, item_path)
+            if os.path.isfile(file):
+                self._open_file(file)
         
     def select_for_testing(self):
         # Clean Workstation tree
         self.workstation.workst_tree.delete(*self.workstation.workst_tree.get_children())
         selected_item = self.file_tree.focus()
         file_path = self.file_tree.item(selected_item)["tags"][0]
-        print(file_path)
+        print(f'This if file path: {file_path}')
         if not file_path.endswith(self.suffix):
             messagebox.showerror(
                 title="Error",
@@ -444,7 +463,7 @@ class WorkStation:
         self.log_console.config(state=tk.NORMAL)
         self.log_console.insert(tk.END, message + '\n')
         self.log_console.see(tk.END)
-        self.log_console.config(state=tk.DISABLED)
+        # self.log_console.config(state=tk.DISABLED)
 
     def show_tests(self):
         # TODO: ListBox of avaliable tests with open, coverage and save buttons
@@ -455,10 +474,12 @@ class WorkStation:
         obj_type = self.workst_tree.item(self.workst_tree.focus())["values"][0]
         if obj_type == "function":
             func_name = self.workst_tree.item(self.workst_tree.focus())["text"]
+            obj_name = func_name
             initial_prompt = TestGenerator.get_prompt(func_name)
         elif obj_type == "class method":
             class_name = self.workst_tree.item(self.workst_tree.parent(self.workst_tree.focus()))["text"]
             method_name = self.workst_tree.item(self.workst_tree.focus())["text"]
+            obj_name = class_name
             initial_prompt = TestGenerator.get_prompt(class_name, method_name)
         initial_message = "\n".join([message["content"] for message in initial_prompt])
         
@@ -468,9 +489,15 @@ class WorkStation:
 
         results = TestGenerator.generate_tests_pipeline(
             initial_prompt,
+            obj_name=obj_name,
             n_samples=int(self.config_window.n_samples),
             max_iter=int(self.config_window.max_iters)
         )
+        # Add Prompting History omit initial system and user prompts
+        for step in results[0]["messages"][2:]:
+            tag = "API" if step["role"] == "assistant" else "User"
+            self.chat_frame.send_message(step["content"], tag=tag)
+
         response = results[0]["test"]
         self.log_message("Test Generation completed.")
         self.chat_frame.send_message(response, tag="API")
@@ -480,7 +507,7 @@ class WorkStation:
         source_code_window = tk.Toplevel()
         source_code_window.title("Coverage Report")
         source_code_window.geometry("800x600")
-        text_widget = tk.Text(source_code_window, spacing3=6)
+        text_widget = SelectableText(source_code_window, spacing3=6)
         text_widget.pack(fill="both", expand=True)
         # Chane font to monospace
         monospace_font = font.Font(family="Courier", size=12)

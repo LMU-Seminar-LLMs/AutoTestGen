@@ -33,6 +33,7 @@ class TestGenerator:
     def generate_tests_pipeline(
         cls,
         initial_prompt: list[dict],
+        obj_name: str,
         n_samples: int=1,
         max_iter: int=5
     ) -> str:
@@ -50,7 +51,7 @@ class TestGenerator:
 
         results: list[dict] = [dict() for _ in range(n_samples)]
         for i, resp in enumerate(responses):
-            resp_str = resp
+            resp_str = cls._adapter.postprocess_response(resp, obj_name=obj_name)
             for max_iter in range(max_iter):
                 test_report = cls._adapter.run_tests_with_coverage(resp_str)
                 if test_report["compile_error"]:
@@ -59,15 +60,14 @@ class TestGenerator:
                         error_msg=test_report["compile_error"],
                         language=cls._adapter.language
                     )
-                    print(new_prompt)
                     messages.extend(
                         [
-                            {'role': 'you', 'content': resp_str},
+                            {'role': 'assistant', 'content': resp_str},
                             {'role': 'user', 'content': new_prompt}
                         ]
                     )
                     resp_str = cls._generate_tests(messages, 1, temp)[0]
-                    print(resp_str)
+                    print(f'Iteration {max_iter}:\n{resp_str}')
 
                 else:
                     # If compiling code succeeded:
@@ -80,14 +80,14 @@ class TestGenerator:
                         # If errors occured
                         messages.extend(
                             [
-                                {'role': 'you', 'content': resp_str},
+                                {'role': 'assistant', 'content': resp_str},
                                 {'role': 'user', 'content': new_prompt}
                             ]
                         )
                         resp_str = cls._generate_tests(messages, 1, temp)[0]
                     else:
                         # If no errors occured
-                        results[i].update({"test": resp_str, "report": test_report})
+                        results[i].update({"messages": messages, "test": resp_str, "report": test_report})
                         break
         return results
 

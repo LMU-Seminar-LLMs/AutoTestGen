@@ -61,7 +61,19 @@ class BaseAdapter(abc.ABC):
             ValueError: If the provided obj_name or method_name cannot be found in given module or script.
         """
         pass
-    
+    @abc.abstractmethod
+    def postprocess_response(self, test: str, **kwargs) -> str:
+        """
+        Postprocesses the test string returned by the API.
+
+        Parameters:
+            test (str): The response string returned by the OpenAI API.
+
+        Returns:
+            str: The postprocessed test string.
+        """
+        pass
+
     @abc.abstractmethod
     def run_tests_with_coverage(self, test_source: str) -> dict[str, ]:
         """
