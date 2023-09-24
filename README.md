@@ -59,10 +59,10 @@ After selecting the project directory, **Main Frame** will be displayed.
 Authentication via the menu bar is required to use the OpenAI API. It opens the following window:
 [![Authentication Window](./assets/auth.png)](https://beta.openai.com/docs/developer-quickstart/your-api-keys)
 
-User has an option to authenticate manually using the entries or using *.env* file containing the API key. For more information about .env authentication see the question mark in the right lower corner of the window.
+You have an option to authenticate manually using the entries or using *.env* file containing the API key. For more information about .env authentication, see the question mark in the right lower corner of the window.
 
 ### File Tree
-File Tree displays all the files having the selected language extension in the project directory. It additionally ignores all the files listed in the .gitignore file if it exists.  User can select the file for testing by *double-clicking* on it.
+File Tree displays all the files having the selected language extension in the project directory. It additionally ignores all the files listed in the .gitignore file if it exists. You can select the file for testing by *double-clicking* on it.
 ![File Tree](./assets/filetree.png)
 
 ***Additional features:***
@@ -71,7 +71,7 @@ File Tree displays all the files having the selected language extension in the p
 
 
 ### Object Tree
-Object Tree displays all the functions/methods in the selected file. Methods are displayed as children nodes of the class they belong to. User simply needs to select desired object before clicking the *Generate Tests* button.
+Object Tree displays all the functions/methods in the selected file. Methods are displayed as children nodes of the class they belong to. You simply need to select desired object before clicking the *Generate Tests* button.
 ![Object Tree](./assets/objecttree.png)
 
 ***Additional features:***
@@ -80,8 +80,8 @@ Object Tree displays all the functions/methods in the selected file. Methods are
 - *double-click* - lists all the tests in the database for the selected object in the *Tests Tree*.
 
 ### Test Configuration
-Test Configuration allows the user to configure the test generation process.
-- The user can select the desired model endpoint through the combobox next to the chat entry. Model can be changed at any time during the test generation process. *Default: gpt-3.5-turbo*.
+Test Configuration allows you to configure the test generation process.
+- You can select the desired model endpoint through the combobox next to the chat entry. The model can be changed at any time during the test generation process. *Default: gpt-3.5-turbo*.
 - Pipeline parameters are set in the settings window:
     - ![Params](./assets/params.png)
     - *temp* - temperature parameter for the model. The higher the temperature, the more random the generated text. For higher n_samples, use higher temperature to ensure diversity in the generated samples. *Default: 0.1*
@@ -89,15 +89,15 @@ Test Configuration allows the user to configure the test generation process.
     - *max_iter* - maximum number of iterations to run the pipeline - automatically reprompt the model in case the generated tests cannot be compiled or contain errors. *Default: 3*
 
 ### Test Generation
-Both the prompts and the generated tests will be displayed in the *Chat Window*. The user can continue communicating with the API through the *Chat Entry* as in normal chat. There is also an option to click *Generate Tests* button again for another object to perform [**few-shot learning**](https://help.openai.com/en/articles/6654000-best-practices-for-prompt-engineering-with-openai-api).  
-All the messages in the *chat window* are send together with the new message to the API until the chat is cleared. [See Other Features](#other-features)  
+Both the prompts and the generated tests will be displayed in the *Chat Window*. you can continue communicating with the API through the *Chat Entry* as in normal chat. There is also an option to click *Generate Tests* button again for another object to perform [**few-shot learning**](https://help.openai.com/en/articles/6654000-best-practices-for-prompt-engineering-with-openai-api).  
+All the messages in the *chat window* are sent together with the new message to the API until the chat is cleared. [See Other Features](#other-features)  
 All succesfully generated tests will be saved in the database and can be viewed in the *Tests Tree*. [See Tests Tree](#tests-tree)
 
 ### Tests Tree
-Tests Tree displays all the tests in the database for the selected object. User can open the tests in a separate window by *double-clicking* on them. The user can make changes to the test there and save it to the database by clicking the *Save Changes* button.
+Tests Tree displays all the tests in the database for the selected object. You can open the tests in a separate window by *double-clicking* on them. You can make changes to the test there and save it to the database by clicking the *Save Changes* button.
 ![Tests Tree](./assets/teststree.png)
 ***Additional features:***
-- *Load Test State Button* - loads the test state from the database. It is useful when the user wants to continue working on the test after closing the application or after manually changing the test file. It can also be used to perform [**few-shot learning**] by loading the tests of the method of the same class before generating the tests for the other method.
+- *Load Test State Button* - loads the test state from the database. It is useful when you want to continue working on the test after closing the application or after manually changing the test file. It can also be used to perform **few-shot learning** by loading the tests of the method of the same class before generating the tests for the other method.
 - Right-click menu:
     - *Open Coverage* - opens the coverage report for the selected test.
     - *See Failures* - opens the window with the list of failures for the selected test.
@@ -111,7 +111,7 @@ Tests Tree displays all the tests in the database for the selected object. User 
 ### Technical Details
 - The application uses [**OpenAI ChatCompletion API**](https://beta.openai.com/docs/api-reference/chat) to generate tests.
 - The application **creates a sqlite database** *autotestgen.db* in the selected project directory to store the generated tests and usage statistics. This is the only file created by the app on the local machine.
-- The application performs code analysis and communication with the API on the **local machine**. It uses **docker container** to execute the generated tests and measure code coverage, returning summarized metadata in json format.
+- The application performs code analysis and communication with the API on the **local machine**. It uses **docker** to execute the generated tests and measure code coverage, returning summarized metadata in json format.
 - At startup, the application **starts** the container, **mounts** the selected project directory as a **read-only** volume and **copies** *_run_tests_script.py* file to the container.
 - On exit, the application **closes the database**, **stops the container and removes it.**
 
