@@ -112,6 +112,8 @@ class PythonAdapter(BaseAdapter):
 
         # Making sure script is only executed when ran from main.
         if not "if __name__ == '__main__':" in test_lines:
+            if "unittest.main()" in test_lines:
+                test_lines.remove("unittest.main()")
             test_lines.append("if __name__ == '__main__':")
             test_lines.append("    unittest.main()")
 
