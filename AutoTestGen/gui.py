@@ -1760,8 +1760,8 @@ class FileTree(ttk.Treeview):
                 tags=(item_path, ),
                 values=(item_path, )
             )
-            if os.path.isdir(item_path): 
-                self.insert_directory(item_id, item_path)
+            if os.path.isdir(os.path.join(current_path, item)):
+                self.insert_directory(item_id, os.path.join(current_path, item))
         
     def is_ignored(self, fn: str) -> bool:
         """    
