@@ -1,17 +1,29 @@
 import tkinter as tk
-from tkinter import filedialog
-import os
+from tkinter import ttk, messagebox, font, filedialog
+import os, sys, subprocess, fnmatch
 from typing import Union
 from dotenv import load_dotenv
-import fnmatch
-import sys, subprocess
 from pathlib import Path
-from tkinter import ttk, messagebox, font, scrolledtext
 import sqlite3, json
-from AutoTestGen import TestGenerator, MODELS, ADAPTERS, SUFFIXES
+from AutoTestGen import ContainerManager, config, utils, generate_tests
+from AutoTestGen import MODELS, ADAPTERS, SUFFIXES
 
 class ChatApp:
-    def __init__(self, root: tk.Tk):
+    """
+    Main class for starting the app.
+
+    Attributes:
+        root: root of the app (tk.Tk).
+        intro_frame: intro frame (IntroFrame).
+        app_frame: app frame (AppFrame).
+        repo_dir: path to the selected repository (str).
+        language: selected language (str).
+        conn: connection to the database (sqlite3.Connection).
+        cont_manager: instance of ContainerManager. For handling
+            container related tasks.
+    """
+
+    def __init__(self, root: tk.Tk) -> None:
         # root
         self.root = root
         self.root.title("Auto Test Generator")
@@ -23,10 +35,11 @@ class ChatApp:
         style.theme_use("clam")
 
         # Main Technical variables
-        self.repo_dir: str=None
-        self.language: str=None
-        self.conn: sqlite3.Connection=None
-        
+        self.repo_dir: str
+        self.language: str
+        self.conn: Union[sqlite3.Connection, None] = None 
+        self.cont_manager: Union[ContainerManager, None] = None
+
         # Intro Frame
         self.intro_frame = IntroFrame(self.root, width=500, height=500)
         # App Frame
@@ -34,6 +47,7 @@ class ChatApp:
         self.load_intro()
     
     def load_intro(self) -> None:
+        """Loads intro frame and its widgets."""
         self._center_window(self.root, 500, 500)
         self.intro_frame.tkraise()
         self.intro_frame.pack(fill="both", expand=True)
@@ -48,10 +62,18 @@ class ChatApp:
         ).pack(pady=15)
     
     def load_app(self) -> None:
+        """
+        Loads app frame. Used when opening repository from intro frame.
+        """
         sys.path[0] = self.repo_dir
         self._center_window(self.root, 1028, 500)
         self._clear_widgets(self.intro_frame)
-        self.app_frame.configure_app(self.repo_dir, self.language, self.conn)
+        self.app_frame.configure_app(
+            self.repo_dir,
+            self.language,
+            self.conn,
+            self.cont_manager
+        )
         self.app_frame.tkraise()
         self.app_frame.pack(fill="both", expand=True)
         self.app_frame.pack_propagate(False)
@@ -66,10 +88,15 @@ class ChatApp:
         self.app_frame.load_widgets()
         
     def reload_intro(self) -> None:
+        """Reloads intro frame. Used when going back to intro frame"""
         self._clear_widgets(self.app_frame)
         self.load_intro()
 
     def open_repo(self) -> None:
+        """
+        Important function: starts the container, prepares the database
+            and sets important atts like repo_dir, language, conn.
+        """
         directory = filedialog.askdirectory()
         if directory:
             # Check size of repo
@@ -84,6 +111,12 @@ class ChatApp:
                 if not resp: return
             self.repo_dir = directory
             self.language = self.intro_frame.choice_var.get()
+            if self.language == "" or self.language is None:
+                messagebox.showerror(
+                    "Error",
+                    "Please select a language"
+                )
+                return
             print("Repo dir:", self.repo_dir)
             print("Starting container...")
             try:
@@ -94,15 +127,33 @@ class ChatApp:
                     "Error occured while preparing database"
                 )
                 raise
-            TestGenerator.connect_to_container(
-                self.repo_dir,
-                image="autotestgen:latest",
-                cont_name="autotestgen"
+            # Initialize ContainerManager
+            if self.intro_frame.image_entry.get() == "":
+                messagebox.showerror(
+                    "Error",
+                    "Please fill in the Docker image Name:Tag field"
+                )
+            try:
+                self.cont_manager = ContainerManager(
+                    image_name=self.intro_frame.image_entry.get(),
+                    repo_dir=self.repo_dir
             )
+            except:
+                messagebox.showerror(
+                    "Error",
+                    (
+                        "Error occured while initializing ContainerManager. "
+                        "Please check the logs for more information"
+                    )
+                )
+                raise
             self.load_app()
 
     def prepare_db(self) -> None:
-        """Prepare database if not avaliable yet in the repo directory"""
+        """
+        Prepare database if not avaliable yet in the repo directory,
+            otherwise connect to existing one.
+        """
         db_path = os.path.join(self.repo_dir, "autotestgen.db")
         if not os.path.isfile(db_path):
             self.conn = sqlite3.connect(db_path)
@@ -125,12 +176,25 @@ class ChatApp:
             print("Database already exists")
             
     def _clear_widgets(self, frame: tk.Frame) -> None:
-        """Clear all widgets of a frame"""
+        """
+        Helper function to clear all deceased widgets given a frame.
+
+        Args:
+            frame: frame to clear (tk.Frame).
+        """
         for widget in frame.winfo_children():
             widget.destroy()
         frame.pack_forget()
 
     def _center_window(self, window: tk.Tk, width: int, height: int) -> None:
+        """
+        Helper function to center window on the screen.
+
+        Args:
+            window: root of the app (tk.Tk).
+            width: width of the window.
+            height: height of the window.
+        """
         screen_width = window.winfo_screenwidth()
         screen_height = window.winfo_screenheight()
         x = (screen_width - width) // 2
@@ -138,56 +202,76 @@ class ChatApp:
         window.geometry(f"{width}x{height}+{x}+{y}") 
 
     def run(self) -> None:
+        """Start the app."""
         self.root.mainloop()
     
     def quit(self) -> None:
+        """
+        Quit the app.
+
+        Important: 
+            stops the container and closes the db connection.
+        
+        """
         print("Closing app...")
-        if TestGenerator._container:
-            TestGenerator._container.reload()
-            if TestGenerator._container.status == "running":
-                try:
-                    TestGenerator._container.stop()
-                except:
-                    messagebox.showerror(
-                        "Error",
-                        "Error occured while stopping container"
-                    )
-                    raise
+        if self.cont_manager:
+            print("Stopping container...")
+            self.cont_manager.close_container()
         if self.conn:
+            print("Closing database connection...")
             self.conn.close()
         self.root.destroy()
 
 
 class IntroFrame(ttk.Frame):
-    def __init__(self, root: tk.Tk, *args, **kwargs):
+    """Intro Frame and its widgets."""
+    def __init__(self, root: tk.Tk, *args, **kwargs) -> None:
         super().__init__(root, *args, **kwargs)
-        # For language selection
+        # For language and Image selection
         self.choice_var = tk.StringVar()
-        
-    def load_widgets(self):
-        self.choice_frame = ttk.LabelFrame(self, text="Select a Language")
-        self.choice_frame.pack(padx=20, pady=10, fill="both", expand=True)
+        self.image_entry: ttk.Entry
+    
+    def load_widgets(self) -> None:
+        """Loads widgets for intro frame"""
+        choice_frame = ttk.LabelFrame(self, text="Select a Language")
+        choice_frame.pack(padx=20, pady=10, fill="both", expand=True)
         for choice in ADAPTERS.keys():
             ttk.Radiobutton(
-                self.choice_frame,
+                choice_frame,
                 text=choice,
                 variable=self.choice_var,
                 value=choice
             ).pack(anchor="w", padx=10, pady=5)
 
+        # Image Entry
+        label = ttk.Label(self, text="Docker image Name:Tag")
+        label.pack(padx=20, pady=10, anchor="center")
+        self.image_entry = ttk.Entry(self)
+        self.image_entry.pack(padx=20, anchor="center")
+
+
 class AppFrame(ttk.Frame):
-    def __init__(self, root: tk.Tk, *args, **kwargs):
+    """
+    App frame class. Contains all the widgets for the app itself.
+
+    Attributes:
+        chat_frame: chat frame (ChatFrame) for chat history and entry.
+        utils_frame: utils frame (UtilsFrame) for file trees and tools.
+    """
+    def __init__(self, root: tk.Tk, *args, **kwargs) -> None:
         super().__init__(root, *args, **kwargs)
         
-        self.repo_dir: Union[str, None]=None
-        self.language: Union[str, None]=None
-        self.suffix: Union[str, None]=None
-        self.conn: Union[sqlite3.Connection, None]=None
+        self.repo_dir: str
+        self.language: str
+        self.suffix: str
+        self.conn: sqlite3.Connection
+        self.cont_manager: ContainerManager
 
-        self.chat_frame: Union[ChatFrame, None]=None
-        self.utils_frame: Union[UtilsFrame, None]=None
+        self.chat_frame: ChatFrame
+        self.utils_frame: UtilsFrame
         
     def load_widgets(self) -> None:
+        """Loads widgets for app frame"""
         MenuBar(self.master, self.repo_dir)
         self.chat_frame = ChatFrame(self)
         self.chat_frame.pack(
@@ -216,18 +300,29 @@ class AppFrame(ttk.Frame):
         )
     
     def refresh(self) -> None:
+        """Refreshes workstation to update tests and coverage data"""
         self.utils_frame.workst_tree.refresh()
 
     def configure_app(
             self,
             repo_dir: str,
             language: str,
-            conn: sqlite3.Connection
+            conn: sqlite3.Connection,
+            cont_manager: ContainerManager
         ) -> None:
+        """
+        Configures app frame with important attributes.
+        
+        Args:
+            repo_dir: path to the selected repository (str).
+            language: selected language (str).
+            conn: connection to the database (sqlite3.Connection).
+        """
         self.repo_dir = repo_dir
         self.suffix = SUFFIXES[language]
         self.language = language
         self.conn = conn
+        self.cont_manager = cont_manager
     
     def populate_db(
             self,
@@ -238,6 +333,17 @@ class AppFrame(ttk.Frame):
             code: str,
             coverage: str
         ) -> None:
+        """
+        Populates database with generated tests and coverage report.
+
+        Args:
+            mod_name: name of the module (str).
+            class_name: name of the class (str).
+            obj_name: name of the object (str).
+            history: chat history (str).
+            code: code of generated test (str).
+            coverage: coverage report in json string format.
+        """
         
         insert_query = """
             INSERT INTO tests
@@ -249,12 +355,22 @@ class AppFrame(ttk.Frame):
             (mod_name, class_name, obj_name, history, code, coverage)
         )
         self.conn.commit()
-    
-
-
 
 class MenuBar(tk.Menu):
-    def __init__(self, master: tk.Tk, repo_dir: str, *args, **kwargs):
+    """
+    Top menu bar for the app.
+    
+    Tabs:
+        Authentication: [Authenticate, Logout]
+    
+    """
+    def __init__(
+            self,
+            master: tk.Tk,
+            repo_dir: str,
+            *args,
+            **kwargs
+        ) -> None:
         super().__init__(master, *args, **kwargs)
         self.repo_dir = repo_dir
         self.file_menu = tk.Menu(self, tearoff=0)
@@ -264,25 +380,45 @@ class MenuBar(tk.Menu):
             command=self.build_auth_window
         )
         self.file_menu.add_separator()
-        self.file_menu.add_command(label="Logout", command=self.logout)
+        self.file_menu.add_command(
+            label="Logout",
+            command=self.logout
+        )
         master.config(menu=self)
 
     def build_auth_window(self, event=None) -> None:
-        if TestGenerator._api_key:
-            message = (
-                "You are already authenticated.",
-                "For re-authentication please logout first."
+        """
+        Builds authentication window. Checks if already authenticated.
+        
+        Note:
+            Initializes instance of class AuthentificationWindow.
+        """
+        if config.API_KEY:
+            messagebox.showinfo(
+                "Status",
+                (
+                    "You are already authenticated.\n"
+                    "For re-authentication please logout first."
+                )
             )
-            messagebox.showinfo("Status", message)
             return
         AuthentificationWindow(self.repo_dir)
     
     def logout(self, event=None) -> None:
-        TestGenerator._api_key = None
-        TestGenerator._org_key = None
-        messagebox.showinfo(title="Status", message="Logged-out successfully")
+        """Logs out from OpenAI API"""
+        config.API_KEY = None
+        config.ORG_KEY = None
+        messagebox.showinfo("Status", "Logged-out successfully")
 
 class AuthentificationWindow(tk.Toplevel):
+    """
+    Authentication window for OpenAI API
+    
+    Methods:
+        gui_auth: authenticates using GUI entries.
+        env_auth: authenticates using .env file.
+        env_help: shows help message for .env authentication.
+    """
     def __init__(self, repo_dir, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.repo_dir = repo_dir
@@ -305,7 +441,7 @@ class AuthentificationWindow(tk.Toplevel):
         # Login Buttons
         ttk.Button(
             self,
-            text="Load .env",
+            text=".env authentication",
             command=self.env_auth
         ).grid(row=2, column=0, padx=5, pady=5, sticky="w")
         ttk.Button(
@@ -325,15 +461,17 @@ class AuthentificationWindow(tk.Toplevel):
         ).grid(row=2, column=2, padx=5, sticky="e")
 
     def gui_auth(self, api_key: str, org: str) -> None:
+        """Authenticates using GUI entries"""
         if api_key == "":
             messagebox.showerror("Error", "Please enter an API Key")
             return
-        TestGenerator.authenticate(api_key, org)
+        utils.set_api_keys(api_key, org)
         self.destroy()
         messagebox.showinfo("Status", "Authentication completed successfully")
 
     def env_auth(self, event=None) -> None:
-        env_file = os.path.join(self.repo_dir, ".env")
+        """Authentication using .env file if avaliabe"""
+        env_file = os.path.join(os.path.dirname(__file__), ".env")
         if os.path.isfile(env_file):
             _ = load_dotenv(env_file)
             variable_names = list(os.environ.keys())
@@ -342,35 +480,44 @@ class AuthentificationWindow(tk.Toplevel):
             else:
                 api_key = os.getenv("OPENAI_API_KEY")
                 org = os.getenv("OPENAI_ORG")
-                TestGenerator.authenticate(api_key, org)
+                utils.set_api_keys(api_key, org)
                 self.destroy()
                 messagebox.showinfo(
                     "Status",
                     "Authentication completed using .env file"
                 )
-
-    def logout(self, event=None) -> None:
-        TestGenerator._api_key = None
-        TestGenerator._org_key = None
-        messagebox.showinfo(title="Status", message="Logged-out successfully")
+        else:
+            messagebox.showerror(
+                "Error",
+                f"No .env file found in {self.repo_dir}"
+            )
 
     def env_help(self, event=None) -> None:
+        """Shows help message for .env authentication"""
         text = (
             "For .env authentication\n"
-            "place .env file in your selected directory.\n"
+            "place .env file in the same directory as gui.py.\n"
             "It should contain at least the 'OPENAI_API_KEY' variable.\n"
             "If you aditionally want to specify organization key,\n"
             "add the 'OPENAI_ORG' variable."
         )
         messagebox.showinfo(".env authentication", text)
     
-
 class ChatFrame(ttk.Frame):
-    def __init__(self, master: AppFrame, *args, **kwargs):
+    """
+    Chat part of the app. Contains chat history and entry.
+    
+    Attributes:
+        self.model_var: model variable to select model for API.
+        self.chat_history: chat box.
+        self.chat_entry: chat entry.
+    """
+    def __init__(self, master: AppFrame, *args, **kwargs) -> None:
         super().__init__(master, *args, **kwargs)
         # Model Variable
         self.master: AppFrame
         self.model_var = tk.StringVar()
+        self.chat_state: list[dict[str, str]] = []
         self.configure(borderwidth=4, relief="groove")
         
         self.chat_history = CustomText(self, state=tk.DISABLED, bg="#B6CEB7")
@@ -420,45 +567,94 @@ class ChatFrame(ttk.Frame):
 
     def send_message(self, message: list[dict], tag: str) -> None:
         """
-            Send message to API and display response in chat history
-            Message should be a list of dicts with keys: "role" and "content"
+            Send message to API and display response in chat history.
+
+            Args:
+                message: list of dicts with keys: "role" and "content".
+                tag: tag name for formatting messages in chat history.
+
+            Important:
+                It enforces the user to start the chat with Generate
+                Tests button, which sends initial prompt engineered
+                message, after which the user has possibility to
+                communicate with the API directly through chat entry.
+                Through the chat existence (before cleaning it),
+                all the previous messages are send together
+                with the new prompt.
+            
+            Raises:
+                Exception: if there is a problem running the pipeline.
         """
-        if TestGenerator._api_key is None:
+        if config.API_KEY is None:
             messagebox.showwarning("Warning", "Please authenticate first!")
             return
-        if TestGenerator._model is None:
+        if config.MODEL is None:
             messagebox.showwarning("Warning", "Please select a model first!")
             return
-        messages = self.collect_history()
+        
         if len(message) > 1:
-            self.display_message(message[0]["content"], "System")
-            self.display_message(message[1]["content"], tag)
+            if self.chat_state == []:
+                self.chat_state.extend(message[:2])
+                self.display_message(message[0]["content"], "System")
+                self.display_message(message[1]["content"], tag)
+            else:
+                self.chat_state.append(message[1])
+                self.display_message(message[1]["content"], tag)  
         else:
-            if self.master.chat_frame.chat_history.get("1.0", "end-1c") == "":
+            if self.chat_state == []:
                 messagebox.showwarning(
                     "Warning",
                     "Please start the chat with Generate Tests button first!"
                 )
-            self.display_message(message[1]["content"], tag)
+                return
+            else:
+                self.chat_state.append(message[0])
+                self.display_message(message[0]["content"], tag)
 
-        messages.extend(message)
         item = self.master.utils_frame.workst_tree.focus()
         obj_name = self.master.utils_frame.workst_tree.item(item)["text"]
         obj_type = self.master.utils_frame.workst_tree.item(item)["values"][0]
+        print("Object name: ", obj_name)
+        print("Object type: ", obj_type)
+        print("Chat state: ", self.chat_state)
         if obj_type == "class method":
-            import_name = self.master.utils_frame.workst_tree.item(
+            class_name = self.master.utils_frame.workst_tree.item(
                 self.master.utils_frame.workst_tree.parent(item)
             )["text"]
-        else:
+            import_name = class_name
+        elif obj_type == "function":
+            class_name = None
             import_name = obj_name
-            
-        result = TestGenerator.generate_tests_pipeline(
-            messages,
-            obj_name=import_name,
-            temp=self.master.utils_frame.temp,
-            n_samples=self.master.utils_frame.n_samples,
-            max_iter=self.master.utils_frame.max_iter
-        )
+        else:
+            messagebox.showerror(
+                "Error",
+                "Please select a class method or function for testing"
+            )
+            return
+        
+        try:
+            result = generate_tests(
+                self.chat_state,
+                self.master.cont_manager,
+                obj_name=import_name,
+                temp=self.master.utils_frame.temp,
+                n_samples=self.master.utils_frame.n_samples,
+                max_iter=self.master.utils_frame.max_iter
+            )
+            self.chat_state.append(
+                {"role": "assistant", "content": result["test"]}
+            )
+            self.display_message(result["test"], "API")
+        except:
+            messagebox.showerror(
+                "Error",
+                (
+                    "Exception occured while running the pipeline. It "
+                    "might be an API related error or an error in the "
+                    "pipiline code itself. Please check the logs.\n"
+                )
+            )
+            raise
 
         if result["report"]["compile_error"]:
             messagebox.showinfo(
@@ -489,23 +685,15 @@ class ChatFrame(ttk.Frame):
             )
         
         else:
-            # Add test to database
-            if obj_type.startswith("class"):
-                class_name = self.master.utils_frame.workst_tree.item(
-                    self.master.utils_frame.workst_tree.parent(item)
-                )["text"]
-            else:
-                class_name = None
-
             self.master.populate_db(
-                mod_name=TestGenerator._adapter.mod_name,
+                mod_name=os.path.basename(config.ADAPTER.module),
                 class_name=class_name,
                 obj_name=obj_name,
                 history=json.dumps(result["messages"]),
                 code=result["test"],
                 coverage=json.dumps(result["report"])
             )
-
+            # Compute coverage
             start, end, _ = self.master.utils_frame._find_lines(
                 obj_name,
                 obj_type,
@@ -525,6 +713,7 @@ class ChatFrame(ttk.Frame):
                 cov = 0
             else:
                 cov = len(ex_lns) / (len(ex_lns) + len(miss_lns))
+            
             cov_report = {
                 "n_tests": result["report"]["tests_ran_n"],
                 "failed": len(result["report"]["failures"]),
@@ -538,65 +727,37 @@ class ChatFrame(ttk.Frame):
                     "object in the Table on the right.\n" + str(cov_report)
                 )
             )
-        self.display_message(result["test"], "API")
         
-    
-    def display_message(self, message: str, tag: str):
-        """Displays message in chat history"""
+    def display_message(self, message: str, tag: str) -> None:
+        """
+        Displays message in chat history
+        
+        Args:
+            message: message to display (str).
+            tag: tag name for formatting message (str).
+        """
         self.chat_history.config(state=tk.NORMAL)
         self.chat_history.insert(tk.END, f"{tag}:\n{message}\n", tag)
         self.chat_history.config(state=tk.DISABLED)
         self.chat_entry.delete(0, tk.END)
-
-    def collect_history(self) -> list[dict]:
-        user_rg = self.chat_history.tag_ranges("User")
-        api_rg = self.chat_history.tag_ranges("API")
-        sys_rg = self.chat_history.tag_ranges("System")
-        messages = []
-        if len(user_rg) != len(api_rg):
-            err_msg = (
-                "Unexpected chat behavior occured.\n"
-                "Please clear chat and try again."
-            )
-            messagebox.showerror("Error", err_msg)
-            return
-        if sys_rg:
-            sys_msg = self.chat_history.get(
-                sys_rg[0],
-                sys_rg[1]
-            ).split("\n")[1]
-            messages.append({"role": "system", "content": sys_msg})
-
-        if user_rg:
-            for st_user, end_user, st_api, end_api in (
-                zip(user_rg[::2], user_rg[1::2], api_rg[::2], api_rg[1::2])
-            ):
-                user_message = self.chat_history.get(
-                    st_user,
-                    end_user
-                ).split("\n")[1]
-                api_message = self.chat_history.get(
-                    st_api,
-                    end_api
-                ).split("\n")[1]
-                messages.extend(
-                    [
-                        {"role": "user", "content": user_message},
-                        {"role": "assistant", "content": api_message}
-                    ]
-                )
-        return messages
     
     def clear_chat(self, event=None) -> None:
+        """Clears chat history"""""
+        self.chat_state.clear()
         self.chat_history.config(state=tk.NORMAL)
         self.chat_history.delete("1.0", tk.END)
         self.chat_history.config(state=tk.DISABLED)
+
     
-    def select_model(self):
-        TestGenerator.set_model(self.model_var.get())
+    def select_model(self) -> None:
+        """Sets model endpoint for API"""
+        utils.set_model(self.model_var.get())
 
 class CustomText(tk.Text):
-    def __init__(self, *args, **kwargs):
+    """
+    CustomText to allow users to select and copy text but not edit it.
+    """
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.bind("<Button-1>", self.delayed_disable)
     
@@ -609,7 +770,15 @@ class CustomText(tk.Text):
 
 
 class UtilsFrame(ttk.Frame):
-    def __init__(self, master: AppFrame, *args, **kwargs):
+    """
+    Utils frame for the app. Contains file trees and tools.
+
+    Attributes:
+        file_tree: file tree for the repository.
+        workst_tree: file tree for the overview of objects inside
+            selected module and avaliable tests.
+    """
+    def __init__(self, master: AppFrame, *args, **kwargs) -> None:
         super().__init__(master, *args, **kwargs)
         self.configure(borderwidth=2, relief="groove")
         self.master: AppFrame
@@ -671,128 +840,134 @@ class UtilsFrame(ttk.Frame):
             text="Generate Tests",
             command=self.gen_tests
         ).pack(side="left", padx=5, pady=5, anchor="sw")
-        # Log Console
-        self.log_console = scrolledtext.ScrolledText(
+
+    def fetch_data(
             self,
-            wrap=tk.WORD,
-            font=("Courier", 13),
-            width=40,
-            heigh=10
-        )
-        self.log_console.insert(tk.END, "Log console:\n")
-        self.log_console.config(state=tk.DISABLED, font=("Courier", 10))
-        self.log_console.pack(fill="both", expand=True)
-
-    def fetch_data(self, obj: str, cls: bool) -> list:
-        """Fetches data from database for tests and coverage"""
-        if cls:
+            obj_name: str,
+            obj_type: str,
+            class_name: Union[str, None]=None
+        ) -> list[tuple]:
+        """
+        Fetches data from database for tests and coverage
+        
+        Args:
+            obj_name: name of the object. 
+            obj_type: type of the object.
+                One of ["function", "class", "class method"].
+            class_name: if obj_type is class method.
+        
+        Returns:
+            list of tuples with data from database.
+        """
+        
+        if obj_type == "class method":
             query = """
-                SELECT DISTINCT class, MAX(id) AS id, coverage_report
-                FROM tests WHERE class=? GROUP BY class
+                SELECT * FROM tests
+                    WHERE obj=? AND class=?
+                    ORDER BY id DESC
             """
-        else:
+            data = self.master.conn.execute(
+                query,
+                (obj_name, class_name)
+            ).fetchall()
+            return data
+        
+        elif obj_type == "function":
             query = "SELECT * FROM tests WHERE obj=? ORDER BY id DESC"
-
-        data = self.master.conn.execute(
-            query,
-            (obj, )
-        ).fetchall()
+        elif obj_type == "class":
+            query = "SELECT * FROM tests WHERE class=? ORDER BY id DESC"
+        else:
+            raise ValueError("Unknown object type")
+        data = self.master.conn.execute(query, (obj_name, )).fetchall()
         return data
     
-    def get_func_cov(self, func_name: str) -> tuple[set, set]:
-        """Returns sets of executed and missing lines for a function"""
+    def get_cov(
+            self,
+            obj_name: str,
+            obj_type: str,
+            class_name: Union[str, None]=None
+        ) -> tuple[set, set]:
+        """
+        Returns sets of executed, missing lines for the object,
+            searches the database.
+
+        Args:
+            obj_name: name of the object.
+            obj_type: type of the object.
+                One of ["function", "class", "class method"].
+            class_name: if obj_type is class method.
+
+        Returns:
+            tuple of sets of executed and missing lines.
+        """
         
-        resp = self.fetch_data(func_name, cls=False)
+        resp = self.fetch_data(obj_name, obj_type, class_name)
         if resp:
-            # Ckck if method
-            print(f"DB entry: {resp[0][2]}")
-            if resp[0][2]:
-                st, end, _ = self._find_lines(
-                    func_name,
-                    "class method",
-                    resp[0][2]
-                )
-            else:
-                st, end, _ = self._find_lines(func_name, "function")
-            data = json.loads(resp[0][-1])
-            exe_lns = [ln for ln in data["executed_lines"] if st <= ln <= end]
-            miss_lns = [ln for ln in data["missing_lines"] if st <= ln <= end]
-            return set(exe_lns), set(miss_lns)
-        else:
-            return set(), set()
-    
-    def get_class_cov(self, class_name: str) -> tuple[set, set]:
-        """Returns set of executed and missing lines for a class"""
-        resp = self.fetch_data(class_name, cls=True)
-        if resp:
-            st, end, _ = self._find_lines(class_name, "class")
+            st, end, _ = self._find_lines(obj_name, obj_type, class_name)
             data = [json.loads(it[-1]) for it in resp]
             exec_lines = [method["executed_lines"] for method in data]
             miss_lines = [method["missing_lines"] for method in data]
-            exec_lines_flat = {
+            
+            exec_lines_flt = {
                 it
                 for subl in exec_lines
                 for it in subl
                 if st <= it <= end
             }
-            miss_lines_flat = {
+            miss_lines_flt = {
                 it
                 for subl in miss_lines
                 for it in subl
                 if st <= it <= end
             }
-            return exec_lines_flat, miss_lines_flat
+            return exec_lines_flt, miss_lines_flt.difference(exec_lines_flt)
         else:
             return set(), set()
-        
+
     def gen_tests(self, event=None) -> None:
+        """Generates tests for selected object"""
         item = self.workst_tree.focus()
         obj_type = self.workst_tree.item(item)["values"][0]
+        
         if obj_type == "function":
             obj = self.workst_tree.item(item)["text"]
             method_name = None
         elif obj_type == "class method":
             obj = self.workst_tree.item(self.workst_tree.parent(item))["text"]
             method_name = self.workst_tree.item(item)["text"]
+        else:
+            messagebox.showerror(
+                "Error",
+                "Please select a class method or function for testing"
+            )
+            return
         
-        initial_prompt = TestGenerator.get_prompt(obj, method_name)
+        initial_prompt = config.ADAPTER.prepare_prompt(
+            obj,
+            method_name
+        )
         self.master.chat_frame.send_message(initial_prompt, tag="User")
 
-    def log_message(self, message: str) -> None:
-        """Logs message in log console"""
-        self.log_console.config(state=tk.NORMAL)
-        self.log_console.insert(tk.END, message + "\n")
-        self.log_console.config(state=tk.DISABLED)
-        self.log_console.see(tk.END)
-    
-    def open_selected_item(self):
+    def open_selected_item(self) -> None:
+        """Opens selected item in default editor"""
         selected_item = self.file_tree.focus()
         if selected_item:
             item_path = self.file_tree.item(selected_item)["tags"][0]
             file = os.path.join(self.master.repo_dir, item_path)
             if os.path.isfile(file):
-                self.open_file(file)
-
-    def open_file(self, file_path):
-        """Opens file in default editor: should cover most platforms"""
-        try:
-            if sys.platform.startswith('darwin'):
-                subprocess.call(('open', file_path))
-            elif sys.platform.startswith('win32'):
-                subprocess.call(('start', file_path), shell=True)
-            elif sys.platform.startswith('linux'):
-                subprocess.call(('xdg-open', file_path))
-            else:
-                print("Unsupported platform:", sys.platform)
-        except Exception:
-            messagebox.showerror("Error", "Error occured while opening file")
-            raise
+                self.file_tree.open_file(file)
 
     def select_for_testing(self) -> None:
+        """
+        Selects module for testing, sets adapter and displys objects
+            in the selected module.
+        """
         self.workst_tree.delete(*self.workst_tree.get_children())
         selected_item = self.file_tree.focus()
         if not selected_item:
-            selected_item = self.current_mod
+            if self.current_mod:
+                selected_item = self.current_mod
+            else: return
         file_path: str = self.file_tree.item(selected_item)["tags"][0]
         if not file_path.endswith(self.master.suffix):
             messagebox.showerror(
@@ -800,22 +975,18 @@ class UtilsFrame(ttk.Frame):
                 f"Please select a {self.master.suffix} file."
             )
             return
-        print(f"Selected File: {file_path}")
 
-        _ = TestGenerator.configure_adapter(
-            self.master.language,
-            module=file_path
-        )
-
-        container_check = TestGenerator._adapter.check_reqs_in_container(
-            TestGenerator._container
+        _ = utils.set_adapter(self.master.language, module_dir=file_path)
+        
+        container_check = config.ADAPTER.check_reqs_in_container(
+            self.master.cont_manager.container
         )
         if container_check:
             messagebox.showerror("Error", container_check)
             return
         
-        func_names = TestGenerator._adapter.retrieve_func_defs()
-        class_names = TestGenerator._adapter.retrieve_class_defs()
+        func_names = config.ADAPTER.retrieve_func_defs()
+        class_names = config.ADAPTER.retrieve_class_defs()
         if func_names + class_names == []:
             messagebox.showinfo(
                 "Info",
@@ -824,7 +995,7 @@ class UtilsFrame(ttk.Frame):
             return
         
         for func_name in func_names:
-            ex, miss = self.get_func_cov(func_name)
+            ex, miss = self.get_cov(func_name, "function")
             if len(ex) == 0:
                 cov = "0%"
             else:
@@ -838,7 +1009,7 @@ class UtilsFrame(ttk.Frame):
             )
 
         for cls in class_names:
-            ex_c, miss_c = self.get_class_cov(cls)
+            ex_c, miss_c = self.get_cov(cls, "class")
             if len(ex_c) == 0:
                 cls_cov = "0%"
             else:
@@ -850,9 +1021,9 @@ class UtilsFrame(ttk.Frame):
                 text=cls,
                 values=("class", cls_cov)
             )
-            methods = TestGenerator._adapter.retrieve_class_methods(cls)
+            methods = config.ADAPTER.retrieve_class_methods(cls)
             for method in methods:
-                ex_m, miss_m = self.get_func_cov(method)
+                ex_m, miss_m = self.get_cov(method, "class method", cls)
                 if len(ex_m) == 0:
                     cov = "0%"
                 else:
@@ -865,8 +1036,8 @@ class UtilsFrame(ttk.Frame):
                 )
             self.current_mod = selected_item
         
-
-    def open_cov_report(self):
+    def open_cov_report(self) -> None:
+        """Opens coverage report for selected object"""
         cov_report = CovWindow()
         item = self.workst_tree.focus()
         obj = self.workst_tree.item(item)["text"]
@@ -878,10 +1049,7 @@ class UtilsFrame(ttk.Frame):
         start, _, lines = self._find_lines(obj, obj_typ, cls)
 
         # Numbering and coloring lines
-        if obj_typ == "class":
-            lns_ex, _ = self.get_class_cov(obj)
-        else:
-            lns_ex, _ = self.get_func_cov(obj)
+        lns_ex, _ = self.get_cov(obj, obj_typ, cls)
 
         for i, line in enumerate(lines, start=start):
             ln_n = "{:3d} ".format(i) + line
@@ -891,15 +1059,28 @@ class UtilsFrame(ttk.Frame):
                 cov_report.text_frame.insert("end", ln_n + "\n")
         cov_report.text_frame.configure(state=tk.DISABLED)
 
-        
     def _find_lines(
-            self, obj: str,
+            self,
+            obj: str,
             obj_type: str,
             cls: Union[str, None]=None
         ) -> tuple[int, int, list[str]]:
-        """Finds start  and end lines of obj definition in module source"""
+        """
+        Finds start, end lines of obj definition in module source code.
 
-        module_source: str = TestGenerator._adapter.retrieve_module_source()
+        Args:
+            obj: name of the object.
+            obj_type: type of the object.
+                One of ["function", "class", "class method"].
+            cls: class name if obj_type is class method.
+
+        Returns:
+            tuple of position where source_code starts, 
+                position where it ends and source code line by line
+                in a list.
+        """
+
+        module_source: str = config.ADAPTER.retrieve_module_source()
         obj_source = self._retrieve_source(obj, obj_type, cls)
 
         obj_src_strp = "\n".join(
@@ -925,12 +1106,13 @@ class UtilsFrame(ttk.Frame):
             obj_type: str,
             cls: Union[str, None]=None
         ) -> str:
+        """Helper function to retrieve source code for the object"""
         if obj_type == "function":
-            source_code = TestGenerator._adapter.retrieve_func_source(obj)
+            source_code = config.ADAPTER.retrieve_func_source(obj)
         elif obj_type == "class":
-            source_code = TestGenerator._adapter.retrieve_class_source(obj)
+            source_code = config.ADAPTER.retrieve_class_source(obj)
         elif obj_type == "class method":
-            source_code = TestGenerator._adapter.retrieve_classmethod_source(
+            source_code = config.ADAPTER.retrieve_classmethod_source(
                 class_name=cls,
                 method_name=obj
             )
@@ -938,22 +1120,38 @@ class UtilsFrame(ttk.Frame):
             messagebox.showinfo("Info", "No source code available.")
         return source_code
 
-    def show_tests(self):
+    def show_tests(self) -> None:
+        """Shows tests for selected object in a new window"""
         item = self.workst_tree.focus()
         obj = self.workst_tree.item(item)["text"]
         obj_typ = self.workst_tree.item(item)["values"][0]
-        TestsWindow(self, obj, obj_typ)
+        if obj_typ == "class method":
+            cls = self.workst_tree.item(self.workst_tree.parent(item))["text"]
+        else:
+            cls = None
+        TestsWindow(self, obj, obj_typ, cls)
         
-
 class TestsWindow(tk.Toplevel):
+    """
+    Window to show avaliable tests in the db for the selected object.
+
+    Methods:
+        populate_tree: populates tests tree with data from database.
+        save_test: saves selected test to a file.
+        delete_test: deletes selected test from the database.
+        open_test: opens selected test in the current window.
+        open_cov_report: opens coverage report for selected test.
+        see_failures: shows failures for selected test.
+    """
     def __init__(
             self,
             master: UtilsFrame,
             obj_name: str,
             obj_type: str,
+            cls: Union[str, None]=None,
             *args,
             **kwargs
-        ):
+        ) -> None:
         super().__init__(master, *args, **kwargs)
         self.master: UtilsFrame
         self.title("Tests")
@@ -962,9 +1160,6 @@ class TestsWindow(tk.Toplevel):
             self,
             columns=("Name", "Total", "Failed", "Coverage")
         )
-        self.obj_name = obj_name
-        self.obj_type = obj_type
-
         self.tree.heading("#0", text="Number", anchor="w")
         self.tree.heading("Name", text="Name", anchor="w")
         self.tree.heading("Total", text="Total", anchor="w")
@@ -973,53 +1168,141 @@ class TestsWindow(tk.Toplevel):
         self.tree.column("Name", width=100)
         self.tree.column("#0", width=10)
         self.tree.pack(fill="both", expand=True)
-        _ = self.populate_tree(obj_name, obj_type)
+        _ = self.populate_tree(obj_name, obj_type, cls)
 
         self.tree.bind("<Double-Button-1>", self.open_test)
+        # Right-click menu
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(
+            label="Open Coverage",
+            command=lambda event=None: self.open_cov_report()
+        )
+        menu.add_command(
+            label="See Failures",
+            command=lambda event=None: self.see_failures()
+        )
+        menu.add_separator()
+        menu.add_command(
+            label="Save Test",
+            command=lambda event=None: self.save_test()
+        )
+        menu.add_command(
+            label="Delete Test",
+            command=lambda event=None: self.delete_test()
+        )
+
+
+        self.tree.bind(
+            "<Button-2>",
+            lambda event: menu.post(event.x_root, event.y_root)
+        )
+        # Test Window
+        self.test_window = CustomText(self, spacing3=6)
+        self.test_window.configure(font=font.Font(family="Courier", size=12))
         
-    def populate_tree(self, obj: str, obj_type: str) -> None:
-        if obj_type == "class":
-            data = self.master.master.conn.execute(
-                "SELECT obj, test, coverage_report FROM tests WHERE class=?",
-                (obj, )
-            ).fetchall()
-        else:
-            data = self.master.master.conn.execute(
-                "SELECT obj, test, coverage_report FROM tests WHERE obj=?",
-                (obj, )
-            ).fetchall()
+    def populate_tree(self, obj: str, obj_type: str, cls: str) -> None:
+        """Populates tests tree with data from database"""
+        data = self.master.fetch_data(obj, obj_type, cls)
         
-        for i, (obj, test, cov_report) in enumerate(data, start=1):
-            lns_ex, lns_miss = self.master.get_func_cov(obj)
+        for i, (prim_id, _, cl_n, obj, _, test, cov_rp) in enumerate(data):
+            if cl_n is None:
+                obj_t = "function"
+                lns_ex, lns_miss = self.master.get_cov(obj, obj_t)
+            else:
+                obj_t = "class method"
+                lns_ex, lns_miss = self.master.get_cov(
+                    obj,
+                    obj_t,
+                    cl_n
+                )
+
             if len(lns_ex) == 0:
                 cov = "0%"
             else:
                 cov = f"{int((len(lns_ex)/(len(lns_ex)+len(lns_miss)))*100)}%"
-            cov_report = json.loads(cov_report)
+        
+            cov_report = json.loads(cov_rp)
             self.tree.insert(
                 parent="",
                 index="end",
-                text=i,
+                text=i+1,
                 values=(
                     obj,
                     cov_report["tests_ran_n"],
                     len(cov_report["failures"]),
                     cov
                 ),
-                tags=(test, )
+                tags=(test, prim_id, obj_t, cov_rp, cl_n)
             )
 
-    def open_test(self, event=None) -> None:
+    def save_test(self):
+        """Saves selected test to a file"""
         test = self.tree.item(self.tree.focus())["tags"][0]
-        test_window = CustomText(self, spacing3=6)
-        test_window.configure(font=font.Font(family="Courier", size=12))
-        test_window.config(state=tk.NORMAL)
-        test_window.insert(tk.END, test)
-        test_window.config(state=tk.DISABLED)
-        test_window.pack(fill="both", expand=True)
+        file = filedialog.asksaveasfile(
+            mode="w",
+            defaultextension=".py",
+            filetypes=[("Python Files", "*.py")]
+        )
+        if file:
+            file.write(test)
+            file.close()
+    
+    def delete_test(self):
+        """Deletes selected test from the database"""
+        primary_id = self.tree.item(self.tree.focus())["tags"][1]
+        self.master.master.conn.execute(
+            "DELETE FROM tests WHERE id=?",
+            (primary_id, )
+        )
+        self.master.master.conn.commit()
+        self.tree.delete(self.tree.focus())
+    
+    def open_cov_report(self):
+        """Opens coverage report for selected test"""
+        item = self.tree.focus()
+        cov_window = CovWindow()
+        cov_report = json.loads(self.tree.item(item)["tags"][3])
+        exec_lines = cov_report["executed_lines"]
+        start, _, lines = self.master._find_lines(
+            self.tree.item(item)["values"][0],
+            self.tree.item(item)["tags"][2],
+            self.tree.item(item)["tags"][4]
+        )
+        for i, line in enumerate(lines, start=start):
+            ln_n = "{:3d} ".format(i) + line
+            if i in exec_lines:
+                cov_window.text_frame.insert("end", ln_n + "\n", "executed")
+            else:
+                cov_window.text_frame.insert("end", ln_n + "\n")
+        cov_window.text_frame.configure(state=tk.DISABLED)
+    
+    def see_failures(self):
+        """Displays failures in a new window"""
+        item = self.tree.focus()
+        failures = json.loads(self.tree.item(item)["tags"][3])["failures"]
+        fail_window = tk.Toplevel(self)
+        fail_window.title("Failures")
+        fail_window.geometry("800x600")
+        text_wid = CustomText(fail_window, spacing3=6)
+        text_wid.tag_configure("name", font=("Courier", 12, "bold"))
+        text_wid.pack(fill="both", expand=True)
+        if failures == []:
+            text_wid.insert(tk.END, "All tests passed!")
+        for (name, fail) in failures:
+            text_wid.insert(tk.END, name + ":\n", "name")
+            text_wid.insert(tk.END, fail + "\n")
 
+    def open_test(self, event=None) -> None:
+        """Displays selected test in the same window"""
+        test = self.tree.item(self.tree.focus())["tags"][0]
+        self.test_window.config(state=tk.NORMAL)
+        self.test_window.delete("1.0", tk.END)
+        self.test_window.insert(tk.END, test)
+        self.test_window.config(state=tk.DISABLED)
+        self.test_window.pack(fill="both", expand=True)
 
 class WorkStationTree(ttk.Treeview):
+    """WorkstationTree separed from UtilsFrame for clarity"""
     def __init__(self, master: UtilsFrame, *args, **kwargs):
         self.master: UtilsFrame
         super().__init__(master, columns=("Type", "Cov"), *args, **kwargs)
@@ -1028,12 +1311,14 @@ class WorkStationTree(ttk.Treeview):
         self.heading("Cov", text="Cov", anchor="w")
         self.column("Type", width=80)
         self.column("Cov", width=30)
-    
+
     def refresh(self) -> None:
+        """Refreshes tree"""
         self.master.select_for_testing()
 
 class CovWindow(tk.Toplevel):
-    def __init__(self, *args, **kwargs):
+    """Coverage Window, for displaying coverage reports"""
+    def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.title("Coverage Report")
         self.geometry("800x600")
@@ -1043,6 +1328,7 @@ class CovWindow(tk.Toplevel):
         self.text_frame.pack(fill="both", expand=True)
         
 class ConfigWindow(tk.Toplevel):
+    """Configuration Window for setting pipeline parameters"""
     def __init__(self, master: UtilsFrame, x_geom, y_geom, *args, **kwargs):
         super().__init__(master, *args, **kwargs)
         self.master: UtilsFrame
@@ -1076,7 +1362,8 @@ class ConfigWindow(tk.Toplevel):
             command=self.destroy
         ).grid(row=3, column=1, pady=5, padx=5, sticky="w")
 
-    def save_settings(self):
+    def save_settings(self) -> None:
+        """Saves pipeline settings to master"""
         temp = self.temp_entry.get()
         max_iter = self.maxiter_entry.get()
         n_samples = self.n_samples_entry.get()
@@ -1093,8 +1380,16 @@ class ConfigWindow(tk.Toplevel):
             return
         self.destroy()
 
-
 class FileTree(ttk.Treeview):
+    """
+    FileTree and its methods
+    
+    Methods:
+        refresh: refreshes tree.
+        insert_directory: resursivly inserts files into tree.
+        is_ignored: checks if file is ignored by .gitignore.
+        open_file: opens file in default editor.
+    """
     def __init__(
             self,
             master: UtilsFrame,
@@ -1102,18 +1397,20 @@ class FileTree(ttk.Treeview):
             suffix: str,
             *args,
             **kwargs
-        ):
+        ) -> None:
         super().__init__(master, *args, **kwargs)
         self.repo_dir = repo_dir
         self.suffix = suffix
         self.column("#0", width=200)
         self.insert_directory(parent="", current_path=self.repo_dir)
 
-    def refresh(self):
+    def refresh(self) -> None:
+        """Refreshes tree"""
         self.delete(*self.get_children())
         self.insert_directory(parent="", current_path=self.repo_dir)
 
     def insert_directory(self, parent: str, current_path: str) -> None:
+        """Recursivly inserts files into tree"""
         items = [
             fn 
             for fn in os.listdir(current_path)
@@ -1138,10 +1435,17 @@ class FileTree(ttk.Treeview):
             if os.path.isdir(item_path): 
                 self.insert_directory(item_id, item_path)
         
-    def is_ignored(self, fn: str):
-        """
-            looks for .gitignore to ignore files in FileTree.
-            Also excludes: setup.py, files starting with "." and __pycache__.
+    def is_ignored(self, fn: str) -> bool:
+        """    
+        looks for .gitignore to ignore files in FileTree.
+        Also excludes:
+            setup.py, files starting with "." and __pycache__.
+
+        Args:
+            fn: file name
+        
+        Returns:
+            True if file is ignored, False otherwise.
         """
         if fn.startswith(".") or fn == "setup.py" or fn == "__pycache__":
             return True
@@ -1157,7 +1461,8 @@ class FileTree(ttk.Treeview):
                             return True
         return False
 
-    def open_file(self, file_path):
+    def open_file(self, file_path: str) -> None:
+        """ Open file in default editor."""
         try:
             if sys.platform.startswith('darwin'):
                 subprocess.call(('open', file_path))
@@ -1170,7 +1475,6 @@ class FileTree(ttk.Treeview):
         except Exception:
             messagebox.showerror("Error", "Error occured while opening file")
             raise
-
 
 if __name__ == "__main__":
     root = tk.Tk()

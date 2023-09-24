@@ -2,10 +2,34 @@ import abc
 from typing import Union
 
 class BaseAdapter(abc.ABC):
-    def __init__(self, language: str, testing_framework: str, mod_name: str):
-        self.framework = testing_framework
+    """
+    Base class for language adapters. All the language adapters
+    should fullfill the requirements of this class.
+
+    Attributes:
+        language (str): Programming language [Python, R, ...]
+        module (str): Path to the module to test.
+    
+    Methods:
+        retrieve_module_source: Returns source code of a module.
+        retrieve_func_defs: Returns list of function names in Body.
+        retrieve_class_defs: Returns list of class names in Body.
+        retrieve_class_methods: Returns list of methods
+            of a given class name.
+        retrieve_func_source: Returns source code of a given function
+            name.
+        retrieve_class_source: Returns source code of a given class
+            name.
+        retrieve_classmethod_source: Returns source code of a given
+            method name of a given class name.
+        check_reqs_in_container: Checks if the container contains
+            necessary requirements and libraries to run the tests.
+        prepare_prompt: Prepare prompts [list of messages] for the API.
+        postprocess_resp: Postprocess the test string returned by API.
+    """
+    def __init__(self, language: str, module: str):
         self.language = language
-        self.mod_name = mod_name 
+        self.module = module
 
     @abc.abstractmethod
     def retrieve_module_source(self) -> str:
@@ -47,9 +71,10 @@ class BaseAdapter(abc.ABC):
         method_name: str
     ) -> str:
         """
-        Returns source code of a method def given class, method names.
+        Returns source code of a method definition given class 
+        and method names.
         
-        Parameters:
+        Args:
             class_name (str): Name of the class.
             method_name (str): Name of the method.
         """
@@ -58,16 +83,15 @@ class BaseAdapter(abc.ABC):
     @abc.abstractmethod
     def check_reqs_in_container(self, container) -> Union[str, None]:
         """
-        Checks if the container contains
-            necessary requirements and libraries to run the tests.
+        Checks if the container contains necessary requirements and
+            libraries to run the tests.
         
-        Parameters:
+        Args:
             container (docker.client.containers.Container): container.
         
         Returns:
-            str: If there is a problem with the requirements, 
-                returns the error message as string.
-            None: If there is no problem with the requirements.
+            str: If there is a missing requirement, error message.
+            None: If all requirements are fullfilled.
         """
         pass
 
@@ -80,25 +104,28 @@ class BaseAdapter(abc.ABC):
         """
         Prepare prompts (list of messages) for the API call.
 
-        Parameters:
-            obj_name (str): Name of the object (class, func) to test.
-            method_name (str): Name of the method to test if obj_name 
-                is a class.
+        Args:
+            obj_name (str): Name of the object [class, func] to test.
+            method_name (str): Name of the method to test if obj_name
+                is a class. Defaults to None.
 
         Returns:
-            list: containing messages and corresponding roles for API.
-        
+            list: containing system and initial user prompt.
+                [
+                    {'role': 'system', 'content': '...'},\n
+                    {'role': 'user', 'content': '...'}
+                ]
         Raises:
-            ValueError: If the provided obj_name or method_name
-                cannot be found in given module or script.
+            ValueError: If obj_name or method_name not found.
         """
         pass
+
     @abc.abstractmethod
     def postprocess_resp(self, test: str, **kwargs) -> str:
         """
         Postprocesses the test string returned by the API.
 
-        Parameters:
+        Args:
             test (str): The response string returned by the OpenAI API.
             **kwargs: Additional keyword arguments.
 

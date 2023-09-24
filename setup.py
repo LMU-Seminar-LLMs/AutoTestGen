@@ -12,6 +12,7 @@ setup(
     packages=find_packages(exclude="notebooks"),
     install_requires=[
         "openai",
+        "tiktoken",
         "docker",
         "python-dotenv",
         "coverage"

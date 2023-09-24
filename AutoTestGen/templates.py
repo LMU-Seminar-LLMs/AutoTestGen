@@ -35,6 +35,12 @@ COMBINING_SAMPLES_PROMPT: str = (
 )
 
 def list_errors(errors: list[tuple[str, str]]) -> str:
+    """
+    Returns a string containing test_name-error_msg pairs.
+    
+    Args:
+        errors: list of tuples containing test_name and error_msg.
+    """
     error_str = "\n".join(
         [
             f"{i}. Test {test_id} failed with error: {error_msg}"
@@ -44,6 +50,12 @@ def list_errors(errors: list[tuple[str, str]]) -> str:
     return error_str
 
 def combine_samples(samples: list[tuple]) -> str:
+    """
+    Returns a string containing response-test_result pairs.
+
+    Args:
+        samples: list of tuples containing response and test_result.
+    """
     combined_str = "\n".join(
         [
             f"{i}. Response:\n{resp}\nResult: {result}"
@@ -64,36 +76,48 @@ def generate_python_info_sheet(
         init: str='',
         class_attributes: str='',
     ):
-    assert obj_type in ["Class", "Function"]
+    assert obj_type in ["class", "function"]
 
-    if obj_type == "Class":
-        descr = class_name + " class"
-    else:
-        descr = "Function"
+    descr = class_name + " class" if obj_type == "class" else "Function"
 
-    info_sheet = f"1. {descr} is defined in the module called: {module_name}\n"
+    info_sheet = (
+        f"1. {descr} is defined in the module called: {module_name}\n"
+    )
     n = 2
     # Class specific
-    if obj_type == "Class":
+    if obj_type == "class":
         if init != "":
-            info_sheet += f"{n}. Class __init__ definition of {descr}:\n{init}\n"
+            info_sheet += (
+                f"{n}. Class __init__ definition of {descr}:\n{init}\n"
+            )
             n += 1
         if class_attributes != "":
             info_sheet += f"{n}. {descr} attributes:{class_attributes}\n"
             n += 1
     
     if imports != "":
-        info_sheet += f"{n}. Following imports were made inside the {module_name} module:{imports}\n"
+        info_sheet += (
+            f"{n}. Following imports were made inside the {module_name} "
+            f"module:\n{imports}"
+        )
         n += 1
-
     if constants != "":
-        info_sheet += f"{n}. Following constants were imported in the {module_name} module:{constants}\n"
+        info_sheet += (
+            f"{n}. Following constants were imported in the {module_name} "
+            f"module:\n{constants}"
+        )
         n += 1
     if variables != "":
-        info_sheet += f"{n}. Following variables were decleared in the {module_name} module body:{variables}\n"
+        info_sheet += (
+            f"{n}. Following variables were decleared in the {module_name} "
+            f"module body:\n{variables}"
+        )
         n += 1
     if local_call_defs != "":
-        info_sheet += f"{n}. Local definitions:{local_call_defs}"
-    
+        info_sheet += (
+            f"{n}. Definitons of functions used inside the "
+            f"{'class method' if obj_type=='class' else 'function'}"
+            f"body:\n{local_call_defs}"
+        )
     return info_sheet
 

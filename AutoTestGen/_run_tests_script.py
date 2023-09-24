@@ -1,56 +1,72 @@
 #!/usr/bin/env python
-
 """
-This script will be copied to the container (after connecting to container) \
-and run there to avoid any mallicious code execution in the local machine.
-The code provided by ChatGPT is as well copied to the container \
-as a 'test_source.{suffix}' file.
-Both are stored in the '/app/' directory of the container.
+This script will be copied to '/app/autotestgen' directory
+in the container and executed from there, in order to
+avoid any malicious code execution in the local machine.
+
 Parameters:
-    - sys.argv[1]: Name of the language adapter to use.
-    - sys.argv[2]: Name of the module or script to test.
+    - sys.argv[1]: Name of the language.
+    - sys.argv[2]: Path to the module/script to test.
+
+    
+Important:
+    - Every runner (function for running test for certain programming
+        language) contained in runner_dict should return a
+        dictionary containing:
+        - 'tests_ran_n' (int): Number of tests that ran.
+        - 'errors' (list[tuple(str, str)]): A list of tuples containing
+            (test_id, traceback) for tests with errors.
+        - 'failures' (list[tuple(str, str)]): A list of tuples
+            containing (test_id, traceback) for tests with failures.
+        - 'executed_lines' (list[int]): executed line numbers
+            based on entire module/script.
+        - 'missing_lines' (list[int]): missing line numbers
+            based on entire module/script.
+        - 'compile_error' (str): If there is a problem compiling
+            the code provided by ChatGPT, this key is set to the
+            error message.
+
 """
-import tempfile
-import sys
-import coverage
-import importlib.util
-import traceback
-import os
+import sys, os, importlib.util, traceback
+import tempfile, json
 import unittest
-import json
+import coverage
+from typing import Union
 
-def run_tests_with_coverage_python(mod_name: str):
+
+def run_tests_with_coverage_python(module_dir: str) -> dict:
     """
-        This function runs tests genereated by ChatGPT and returns the result. It only takes name of the module/script to test as an argument.
+    Run test code provided by GPT while measuring coverage.
+    
+    Parameters:
+        module_dir (str): Path to the module/script to test.
 
-        Parameters:
-            mod_name (str): Name of the module or script to test.
+    Important:
+        - GPT generated code is already put in the container, under
+            the filename 'test_source.py'.
+    """
+    
+    def _run_tests() -> Union[unittest.TestResult, str]:
+        """
+        Runs the tests and returns the result.
 
         Returns:
-            dict: A dictionary containing specific key-value pairs.\n
-            - 'tests_ran_n' (int): Number of tests that ran.\n
-            - 'errors' (list[tuple(str, str)]): A list of tuples containing (test_id, traceback_message)
-                        for tests with errors.\n
-            - 'failures' (list[tuple(str, str)]): A list of tuples containing (test_id, traceback_message)
-                        for tests with failures.\n
-            - 'executed_lines' (list[int]): executed line numbers [based on the entire module or script].\n
-            - 'missing_lines' (list[int]): missing line numbers [based on the entire module or script].
-            - 'compile_error' (str): If there is a problem compiling the code provided by ChatGPT,
-                            this is set to the error message.
-
-        Exception:
-            If there is a problem compiling the code provided by ChatGPT, dict['compail_fail'] is set to the error message.
-    """
-    def _run_tests():
-        """Runs the tests and returns the result."""
+            str: error message, if there is a problem compiling
+                GPT generated code.
+            unittest.TestResult: result of the tests.
+        """
         try:
-            # Try Loading Temp file as module: Checks if provided code by ChatGPT is a valid module/script
-            # test_source file is already put in the container
-            spec = importlib.util.spec_from_file_location("test_source", "test_source.py")
+            spec = importlib.util.spec_from_file_location(
+                name="test_source",
+                location="/autotestgen/test_source.py"
+            )
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
+        except FileNotFoundError:
+            raise
         except Exception as e:
             return traceback.format_exception_only(type(e), e)[-1]
+    
         # Set-up Tests
         test_loader = unittest.TestLoader()
         test_suite = test_loader.loadTestsFromModule(module=module)
@@ -59,14 +75,25 @@ def run_tests_with_coverage_python(mod_name: str):
         result = runner.run(test_suite)
         return result
 
+    # Unload module if already loaded to ensure correct cov tracking
+    if module_dir.startswith("/"):
+        mod_name = module_dir[1:-3].replace('/', '.')
+    else:
+        mod_name = module_dir[:-3].replace('/', '.')
+    
     if mod_name in sys.modules:
         del sys.modules[mod_name]
 
     # Create Temp file for json report
     try:
-        temp_json = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".json")
+        temp_json = tempfile.NamedTemporaryFile(
+            mode='w',
+            delete=False,
+            suffix=".json"
+        )
     finally:
         temp_json.close()
+        os.remove(temp_json.name)
     
     cov = coverage.Coverage(source=[mod_name], messages=True)
     cov.start()
@@ -75,15 +102,13 @@ def run_tests_with_coverage_python(mod_name: str):
     
     test_metadata = dict()
     if isinstance(result, str):
-        # Return exception message
         test_metadata['compile_error'] = result
         return test_metadata
+    
     try:
         cov.json_report(outfile=temp_json.name)
         with open(temp_json.name) as file:
             json_report = json.load(file)
-        temp_json.close()
-        os.remove(temp_json.name)
 
         # Prepare metadata
         test_metadata['tests_ran_n'] = result.testsRun
@@ -96,24 +121,27 @@ def run_tests_with_coverage_python(mod_name: str):
             for (n, err) in result.failures
         ]
         fn = [*json_report["files"].keys()][0]
-        test_metadata['executed_lines'] = json_report["files"][fn]['executed_lines']
-        test_metadata['missing_lines'] = json_report["files"][fn]['missing_lines']
+        test_metadata['executed_lines'] = (
+            json_report["files"][fn]['executed_lines']
+        )
+        test_metadata['missing_lines'] = (
+            json_report["files"][fn]['missing_lines']
+        )
         test_metadata['compile_error'] = None
     except:
-        test_metadata['compile_error'] = f"Make sure to import the definition from {mod_name} module. "\
-            f"Include 'from {mod_name} import *' in your response."
+        print("Error occured while writing coverage data in the container.")
     return test_metadata
 
 
+# Dictionary of runners
 runner_dict = {
     "python": run_tests_with_coverage_python
 }
 
 if __name__ == "__main__":
+    # Path where local repo is mounted in container
     sys.path[0] = "/tmp/autotestgen/"
+    # Run tests
     test_metadata = runner_dict[sys.argv[1]](sys.argv[2])
-    # Write metadata to json
-    with open("test_metadata.json", "w") as f:
+    with open("/autotestgen/test_metadata.json", "w") as f:
         json.dump(test_metadata, f)
-    print("json file successfully written.")
-

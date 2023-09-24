@@ -1,5 +1,6 @@
 from typing import Type
 from . import language_adapters
+
 # Supported Models
 MODELS: list[str] = [
     'gpt-3.5-turbo',
@@ -15,6 +16,7 @@ ADAPTERS: dict[str, Type[language_adapters.BaseAdapter]] = {
     "java": language_adapters.JavaAdapter
 }
 
+# Language file suffixes
 SUFFIXES: dict[str, str] = {
     "python": ".py",
     "r": ".r",
