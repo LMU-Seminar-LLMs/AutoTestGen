@@ -57,15 +57,13 @@ After selecting the project directory, **Main Frame** will be displayed.
 
 
 ### Authentication
-Authentication tab in the menu bar is required to use the OpenAI API. It opens the following window:
+Authentication via the menu bar is required to use the OpenAI API. It opens the following window:
 [![Authentication Window](./assets/auth.png)](https://beta.openai.com/docs/developer-quickstart/your-api-keys)
-
 User has an option to authenticate manually using the entries or using *.env* file containing the API key. For more information about .env authentication see the question mark in the right lower corner of the window.
 
 ### File Tree
 File Tree displays all the files having the selected language extension in the project directory. It additionally ignores all the files listed in the .gitignore file if it exists.  User can select the file for testing by *double-clicking* on it.
-![File Tree](./assets/FileTree.png)
-
+![File Tree](./assets/filetree.png)
 ***Additional features:***
 - Right-click menu:
     - *Open* - opens the file in the default editor. It can be used for quick fixes of the code before generating the tests.
@@ -74,7 +72,6 @@ File Tree displays all the files having the selected language extension in the p
 ### Object Tree
 Object Tree displays all the functions/methods in the selected file. Methods are displayed as children nodes of the class they belong to. User simply needs to select desired object before clicking the *Generate Tests* button.
 ![Object Tree](./assets/objecttree.png)
-
 ***Additional features:***
 - Right-click menu:
     - *Open Coverage* - opens the coverage report accumulated over all avaliable tests in the database for the selected object.
@@ -84,7 +81,7 @@ Object Tree displays all the functions/methods in the selected file. Methods are
 Test Configuration allows the user to configure the test generation process.
 - The user can select the desired model endpoint through the combobox next to the chat entry. Model can be changed at any time during the test generation process. *Default: gpt-3.5-turbo*.
 - Pipeline parameters are set in the settings window:
-![Params](./assets/params.png)
+    - ![Params](./assets/params.png)
     - *temp* - temperature parameter for the model. The higher the temperature, the more random the generated text. For higher n_samples, use higher temperature to ensure diversity in the generated samples. *Default: 0.1*
     - *n_samples* - number of samples to generate with the initial prompt. If it is larger than 1, the model will generate multiple samples which are evaluated separately and summarized in single new prompt which will generate the final single response. *Default: 1*
     - *max_iter* - maximum number of iterations to run the pipeline - automatically reprompt the model in case the generated tests cannot be compiled or contain errors. *Default: 3*
@@ -97,7 +94,6 @@ All succesfully generated tests will be saved in the database and can be viewed 
 ### Tests Tree
 Tests Tree displays all the tests in the database for the selected object. User can open the tests in a separate window by *double-clicking* on them. The user can make changes to the test there and save it to the database by clicking the *Save Changes* button.
 ![Tests Tree](./assets/teststree.png)
-
 ***Additional features:***
 - *Load Test State Button* - loads the test state from the database. It is useful when the user wants to continue working on the test after closing the application or after manually changing the test file. It can also be used to perform [**few-shot learning**] by loading the tests of the method of the same class before generating the tests for the other method.
 - Right-click menu:
