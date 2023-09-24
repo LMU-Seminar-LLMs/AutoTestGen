@@ -550,11 +550,10 @@ class AuthentificationWindow(tk.Toplevel):
     def env_help(self, event=None) -> None:
         """Shows help message for .env authentication"""
         text = (
-            "For .env authentication\n"
-            "place .env file in the same directory as gui.py.\n"
-            "It should contain at least the 'OPENAI_API_KEY' variable.\n"
-            "If you aditionally want to specify organization key,\n"
-            "add the 'OPENAI_ORG' variable."
+            "For .env authentication place .env file in the"
+            f"{os.path.dirname(__file__)} directory. It should contain: "
+            "at least the 'OPENAI_API_KEY' variable. If you aditionally "
+            "want to specify organization key, add the 'OPENAI_ORG' variable."
         )
         messagebox.showinfo(".env authentication", text)
 
@@ -966,7 +965,8 @@ class UtilsFrame(ttk.Frame):
             self.master.suffix,
             show="tree",
             columns=["Value"],
-            height=4
+            height=4,
+            cursor="hand2"
         )
         self.file_tree.pack(fill="both", expand=True)
         self.menu = tk.Menu(self, tearoff=0)
@@ -1908,3 +1908,6 @@ def main() -> None:
     root = tk.Tk()
     app = ChatApp(root)
     app.run()
+
+if __name__ == "__main__":
+    main()
