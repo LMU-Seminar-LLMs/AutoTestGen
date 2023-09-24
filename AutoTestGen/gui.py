@@ -965,8 +965,7 @@ class UtilsFrame(ttk.Frame):
             self.master.suffix,
             show="tree",
             columns=["Value"],
-            height=4,
-            cursor="hand2"
+            height=4
         )
         self.file_tree.pack(fill="both", expand=True)
         self.menu = tk.Menu(self, tearoff=0)
